@@ -254,7 +254,7 @@ async fn handle_connection(conn: Connection, pool: Arc<HelperPool>) -> bool {
         let pool = pool.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_stream(send, recv, pool).await {
-                debug!(error = %e, "stream error");
+                warn!(error = %e, "stream failed");
             }
         });
     }

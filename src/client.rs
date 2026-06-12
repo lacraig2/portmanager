@@ -177,9 +177,17 @@ async fn accept_loop(listener: TcpListener, slot: ConnSlot, forward: ForwardSpec
                 debug!(%peer, "local connection accepted");
                 let slot = slot.clone();
                 let forward = forward.clone();
+                let target = format!("{}:{}", forward.remote_host, forward.remote_port);
+                let ns = forward.ns.to_wire();
                 tokio::spawn(async move {
                     if let Err(e) = serve_one(slot, forward, tcp).await {
-                        debug!(error = %e, "forward stream ended");
+                        warn!(
+                            %peer,
+                            %target,
+                            %ns,
+                            error = %e,
+                            "forward connection failed"
+                        );
                     }
                 });
             }
