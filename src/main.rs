@@ -1,6 +1,7 @@
 //! portmanager — resilient QUIC port forwarder with SSH auto-bootstrap.
 
 mod cli;
+mod crypto;
 mod error;
 mod forward;
 
@@ -15,6 +16,7 @@ use crate::forward::ForwardSpec;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    crypto::init();
 
     match cli.command {
         Some(Command::Agent(_args)) => {

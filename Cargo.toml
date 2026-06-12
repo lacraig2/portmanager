@@ -16,6 +16,7 @@ rand = "0.10.1"
 rcgen = "0.14.7"
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 serde = { version = "1.0.228", features = ["derive"] }
+sha2 = "0.11.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = "0.7.18"
