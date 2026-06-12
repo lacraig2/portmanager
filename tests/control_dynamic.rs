@@ -145,6 +145,7 @@ async fn control_socket_add_drop_list_status() {
 
 /// Discovery end-to-end against the host namespace: a listener that starts
 /// AFTER the session is up gets auto-forwarded per a matching rule.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn discovery_autoforwards_new_listener() {
     let host = format!("testdisc-{}", std::process::id());
