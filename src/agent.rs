@@ -29,6 +29,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::crypto::{self, Identity};
+use crate::error;
 use crate::forward::NsSpec;
 use crate::handshake::{Hello, Ready, SessionId};
 use crate::netns::HelperPool;
@@ -254,7 +255,8 @@ async fn handle_connection(conn: Connection, pool: Arc<HelperPool>) -> bool {
         let pool = pool.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_stream(send, recv, pool).await {
-                warn!(error = %e, "stream failed");
+                let error = error::format_chain(&e);
+                warn!(%error, "stream failed");
             }
         });
     }

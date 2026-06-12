@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::error;
 use crate::forward::ForwardSpec;
 use crate::proto::{self, StreamHeader};
 
@@ -181,11 +182,12 @@ async fn accept_loop(listener: TcpListener, slot: ConnSlot, forward: ForwardSpec
                 let ns = forward.ns.to_wire();
                 tokio::spawn(async move {
                     if let Err(e) = serve_one(slot, forward, tcp).await {
+                        let error = error::format_chain(&e);
                         warn!(
                             %peer,
                             %target,
                             %ns,
-                            error = %e,
+                            %error,
                             "forward connection failed"
                         );
                     }

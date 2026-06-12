@@ -2,6 +2,15 @@
 
 use thiserror::Error;
 
+/// Render an anyhow error with its cause chain on one log-friendly line.
+pub fn format_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 /// Errors produced while parsing a forward spec from the CLI or config.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SpecError {
