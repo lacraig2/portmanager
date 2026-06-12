@@ -79,6 +79,28 @@ impl NsSpec {
     pub fn is_host(&self) -> bool {
         matches!(self, NsSpec::Host)
     }
+
+    /// Canonical wire form, matching the CLI grammar. Empty string for the host
+    /// namespace; otherwise `<kind>:<value>`.
+    pub fn to_wire(&self) -> String {
+        match self {
+            NsSpec::Host => String::new(),
+            NsSpec::Podman(n) => format!("podman:{n}"),
+            NsSpec::Docker(n) => format!("docker:{n}"),
+            NsSpec::Pid(p) => format!("pid:{p}"),
+            NsSpec::Netns(n) => format!("netns:{n}"),
+            NsSpec::NsPath(p) => format!("nspath:{}", p.display()),
+        }
+    }
+
+    /// Parse a wire-form selector (the inverse of [`NsSpec::to_wire`]).
+    pub fn from_wire(s: &str) -> Result<Self, SpecError> {
+        if s.is_empty() {
+            Ok(NsSpec::Host)
+        } else {
+            NsSpec::parse(s)
+        }
+    }
 }
 
 /// One fully-parsed port forward.

@@ -1,19 +1,16 @@
-//! portmanager — resilient QUIC port forwarder with SSH auto-bootstrap.
-
-mod cli;
-mod crypto;
-mod error;
-mod forward;
+//! portmanager binary entry point.
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command};
-use crate::forward::ForwardSpec;
+use portmanager::cli::{self, Cli, Command};
+use portmanager::crypto;
+use portmanager::forward::ForwardSpec;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     crypto::init();
@@ -28,12 +25,12 @@ fn main() -> Result<()> {
         | Some(Command::Status { .. }) => {
             anyhow::bail!("control-socket subcommands not yet implemented");
         }
-        None => run_client(cli.run),
+        None => run_client(cli.run).await,
     }
 }
 
 /// Default action: parse the forward set for a host and (eventually) start a session.
-fn run_client(args: cli::RunArgs) -> Result<()> {
+async fn run_client(args: cli::RunArgs) -> Result<()> {
     let host = args
         .host
         .context("no host given; usage: portmanager <host> <spec>...")?;
@@ -48,7 +45,7 @@ fn run_client(args: cli::RunArgs) -> Result<()> {
         let ns = if f.ns.is_host() {
             String::new()
         } else {
-            format!("{:?}@", f.ns)
+            format!("{}@", f.ns.to_wire())
         };
         info!(
             "  {ns}{}:{} -> {}:{}",
@@ -56,7 +53,7 @@ fn run_client(args: cli::RunArgs) -> Result<()> {
         );
     }
 
-    anyhow::bail!("session start not yet implemented (parsing works)");
+    anyhow::bail!("session start not yet implemented (bootstrap pending)");
 }
 
 /// Parse a list of forward-spec strings, surfacing the offending spec on error.
