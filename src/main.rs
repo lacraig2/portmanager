@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use portmanager::cli::{self, Cli, Command};
 use portmanager::forward::ForwardSpec;
 use portmanager::supervisor::{Status, Supervisor};
-use portmanager::{agent, client, crypto};
+use portmanager::{agent, client, crypto, netns};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -26,6 +26,7 @@ fn main() -> Result<()> {
             Duration::from_secs(args.grace_secs),
             args.foreground,
         ),
+        Some(Command::NsHelper) => netns::run_helper(),
         Some(Command::Add { .. })
         | Some(Command::Drop { .. })
         | Some(Command::List { .. })

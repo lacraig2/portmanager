@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod error;
 pub mod forward;
 pub mod handshake;
+pub mod netns;
 pub mod netwatch;
 pub mod proto;
 pub mod supervisor;

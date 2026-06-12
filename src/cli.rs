@@ -68,6 +68,10 @@ pub enum Command {
     /// Remote agent role. Launched automatically over SSH; not for manual use.
     #[command(hide = true)]
     Agent(AgentArgs),
+    /// In-namespace connect helper. Spawned by the agent under nsenter with a
+    /// socketpair as stdin; not for manual use.
+    #[command(hide = true, name = "ns-helper")]
+    NsHelper,
 }
 
 #[derive(Debug, Args)]

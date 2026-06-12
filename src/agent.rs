@@ -29,7 +29,9 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::crypto::{self, Identity};
+use crate::forward::NsSpec;
 use crate::handshake::{Hello, Ready, SessionId};
+use crate::netns::HelperPool;
 use crate::proto::{self, StreamHeader};
 
 /// Application close code meaning "shut the session down now" (client Ctrl-C).
@@ -151,16 +153,20 @@ pub async fn serve_with_grace(endpoint: Endpoint, grace: Duration) -> Result<()>
 
     // (active connection count, explicit-shutdown flag)
     let (state_tx, mut state_rx) = watch::channel((0usize, false));
+    // Namespace connect-helpers live as long as the session (reused across
+    // client reconnects, torn down when the agent exits).
+    let pool = Arc::new(HelperPool::new());
 
     let accept_endpoint = endpoint.clone();
     let accept = tokio::spawn(async move {
         while let Some(incoming) = accept_endpoint.accept().await {
             let state_tx = state_tx.clone();
+            let pool = pool.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
                         state_tx.send_modify(|(n, _)| *n += 1);
-                        let shutdown = handle_connection(conn).await;
+                        let shutdown = handle_connection(conn, pool).await;
                         state_tx.send_modify(|(n, s)| {
                             *n -= 1;
                             *s |= shutdown;
@@ -219,7 +225,7 @@ pub async fn serve_with_grace(endpoint: Endpoint, grace: Duration) -> Result<()>
 
 /// Serve all bidi streams on one authenticated connection.
 /// Returns `true` if the client requested an explicit session shutdown.
-async fn handle_connection(conn: Connection) -> bool {
+async fn handle_connection(conn: Connection, pool: Arc<HelperPool>) -> bool {
     let peer = conn.remote_address();
     info!(%peer, "client connected");
     loop {
@@ -236,33 +242,50 @@ async fn handle_connection(conn: Connection) -> bool {
                 return false;
             }
         };
+        let pool = pool.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_stream(send, recv).await {
+            if let Err(e) = handle_stream(send, recv, pool).await {
                 debug!(error = %e, "stream error");
             }
         });
     }
 }
 
-/// Read the header, dial the target, and splice.
-async fn handle_stream(mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+/// Read the header, dial the target (in-namespace when requested), and splice.
+async fn handle_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    pool: Arc<HelperPool>,
+) -> Result<()> {
     let header = StreamHeader::read(&mut recv)
         .await
         .context("reading stream header")?;
 
-    if !header.ns.is_empty() {
-        // Rootless namespace dialing arrives in a later step; fail clearly.
-        let _ = send.reset(VarInt::from_u32(1));
-        anyhow::bail!("namespace dialing not yet supported (ns={})", header.ns);
-    }
-
     let target = format!("{}:{}", header.host, header.port);
-    debug!(%target, "dialing target");
-    let tcp = match TcpStream::connect(&target).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = send.reset(VarInt::from_u32(2));
-            return Err(e).context(format!("connecting to {target}"));
+    let tcp = if header.ns.is_empty() {
+        debug!(%target, "dialing target");
+        match TcpStream::connect(&target).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = send.reset(VarInt::from_u32(2));
+                return Err(e).context(format!("connecting to {target}"));
+            }
+        }
+    } else {
+        let ns = match NsSpec::from_wire(&header.ns) {
+            Ok(ns) => ns,
+            Err(e) => {
+                let _ = send.reset(VarInt::from_u32(1));
+                anyhow::bail!("bad namespace selector {:?}: {e}", header.ns);
+            }
+        };
+        debug!(%target, ns = %header.ns, "dialing target in namespace");
+        match pool.connect(&ns, &header.host, header.port).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = send.reset(VarInt::from_u32(1));
+                return Err(e).context(format!("connecting to {target} in {}", header.ns));
+            }
         }
     };
 
