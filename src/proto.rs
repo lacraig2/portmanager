@@ -8,7 +8,7 @@
 use std::io;
 
 use quinn::{RecvStream, SendStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// Current stream-protocol version (ALPN also gates this at the TLS layer).

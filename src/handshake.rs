@@ -1,0 +1,249 @@
+//! Bootstrap handshake exchanged over the (authenticated) SSH pipe.
+//!
+//! The client writes a [`Hello`] to the agent's stdin; the agent replies with a
+//! [`Ready`] on its stdout. Secrets (the session token) ride the SSH channel,
+//! never argv, so they aren't exposed via `/proc/<pid>/cmdline`.
+//!
+//! Wire format is one newline-terminated ASCII line per message:
+//! ```text
+//! PM-HELLO v1 <client_fp_hex> <token_hex>
+//! PM-READY v1 <udp_port> <agent_fp_hex> <session_id_hex>
+//! PM-ERROR <message...>
+//! ```
+
+use anyhow::{Context, Result, bail};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::crypto::Fingerprint;
+
+/// Handshake/wire protocol version.
+pub const PROTO_VERSION: u32 = 1;
+
+const HELLO_TAG: &str = "PM-HELLO";
+const READY_TAG: &str = "PM-READY";
+const ERROR_TAG: &str = "PM-ERROR";
+
+/// 32-byte shared secret used to authorize SSH-less re-attach to a live agent.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token([u8; 32]);
+
+/// 16-byte logical session identifier (decoupled from any QUIC connection).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SessionId([u8; 16]);
+
+macro_rules! hex_newtype {
+    ($t:ty, $n:expr) => {
+        impl $t {
+            /// Generate from the OS CSPRNG.
+            pub fn random() -> Result<Self> {
+                let mut buf = [0u8; $n];
+                getrandom::fill(&mut buf).context("reading OS randomness")?;
+                Ok(Self(buf))
+            }
+            /// Lowercase hex encoding.
+            pub fn to_hex(&self) -> String {
+                hex::encode(self.0)
+            }
+            /// Parse from hex.
+            pub fn from_hex(s: &str) -> Result<Self> {
+                let bytes = hex::decode(s.trim()).context("value is not valid hex")?;
+                let arr: [u8; $n] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!(concat!("expected ", $n, " bytes")))?;
+                Ok(Self(arr))
+            }
+            /// Constant-time equality.
+            pub fn ct_eq(&self, other: &Self) -> bool {
+                let mut diff = 0u8;
+                for (a, b) in self.0.iter().zip(other.0.iter()) {
+                    diff |= a ^ b;
+                }
+                diff == 0
+            }
+        }
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({})", stringify!($t), self.to_hex())
+            }
+        }
+    };
+}
+
+hex_newtype!(Token, 32);
+hex_newtype!(SessionId, 16);
+
+/// Client -> agent: client identity + session secret.
+#[derive(Debug, Clone)]
+pub struct Hello {
+    pub client_fp: Fingerprint,
+    pub token: Token,
+}
+
+/// Agent -> client: where to reach the QUIC listener and how to pin it.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    pub udp_port: u16,
+    pub agent_fp: Fingerprint,
+    pub session_id: SessionId,
+}
+
+impl Hello {
+    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let line = format!(
+            "{HELLO_TAG} v{PROTO_VERSION} {} {}\n",
+            self.client_fp.to_hex(),
+            self.token.to_hex()
+        );
+        w.write_all(line.as_bytes()).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read<R: AsyncBufReadExt + Unpin>(r: &mut R) -> Result<Self> {
+        let parts = read_tagged_line(r, HELLO_TAG).await?;
+        if parts.len() != 4 {
+            bail!("malformed HELLO: wrong field count");
+        }
+        Ok(Hello {
+            client_fp: Fingerprint::from_hex(&parts[2])?,
+            token: Token::from_hex(&parts[3])?,
+        })
+    }
+}
+
+impl Ready {
+    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let line = format!(
+            "{READY_TAG} v{PROTO_VERSION} {} {} {}\n",
+            self.udp_port,
+            self.agent_fp.to_hex(),
+            self.session_id.to_hex()
+        );
+        w.write_all(line.as_bytes()).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read<R: AsyncBufReadExt + Unpin>(r: &mut R) -> Result<Self> {
+        let parts = read_tagged_line(r, READY_TAG).await?;
+        if parts.len() != 5 {
+            bail!("malformed READY: wrong field count");
+        }
+        let udp_port = parts[2].parse::<u16>().context("invalid udp port")?;
+        Ok(Ready {
+            udp_port,
+            agent_fp: Fingerprint::from_hex(&parts[3])?,
+            session_id: SessionId::from_hex(&parts[4])?,
+        })
+    }
+}
+
+/// Write a `PM-ERROR <message>` line.
+pub async fn write_error<W: AsyncWrite + Unpin>(w: &mut W, message: &str) -> Result<()> {
+    let line = format!("{ERROR_TAG} {message}\n");
+    w.write_all(line.as_bytes()).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+/// Read one non-empty line and split it, verifying the expected tag and version.
+/// A `PM-ERROR` line is surfaced as an error with its message.
+async fn read_tagged_line<'a, R: AsyncBufReadExt + Unpin>(
+    r: &mut R,
+    expected_tag: &str,
+) -> Result<Vec<String>> {
+    // Skip blank lines (e.g. stray shell output) until a tagged line appears.
+    let line = loop {
+        let mut line = String::new();
+        let n = r.read_line(&mut line).await.context("reading handshake line")?;
+        if n == 0 {
+            bail!("connection closed before {expected_tag}");
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        break trimmed.to_string();
+    };
+
+    let parts: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    match parts.first().map(String::as_str) {
+        Some(t) if t == ERROR_TAG => {
+            let msg = line.strip_prefix(ERROR_TAG).unwrap_or(&line).trim().to_string();
+            bail!("agent reported: {msg}");
+        }
+        Some(t) if t == expected_tag => {}
+        other => bail!("expected {expected_tag}, got {other:?}"),
+    }
+    let version = parts.get(1).map(String::as_str).unwrap_or("");
+    if version != format!("v{PROTO_VERSION}") {
+        bail!("protocol version mismatch: agent sent {version:?}");
+    }
+    Ok(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{self, Identity};
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn hello_roundtrip() {
+        crypto::init();
+        let id = Identity::generate().unwrap();
+        let hello = Hello {
+            client_fp: id.fingerprint,
+            token: Token::random().unwrap(),
+        };
+        let mut buf = Vec::new();
+        hello.write(&mut buf).await.unwrap();
+        let mut r = BufReader::new(&buf[..]);
+        let got = Hello::read(&mut r).await.unwrap();
+        assert_eq!(got.client_fp, hello.client_fp);
+        assert!(got.token.ct_eq(&hello.token));
+    }
+
+    #[tokio::test]
+    async fn ready_roundtrip() {
+        crypto::init();
+        let id = Identity::generate().unwrap();
+        let ready = Ready {
+            udp_port: 51820,
+            agent_fp: id.fingerprint,
+            session_id: SessionId::random().unwrap(),
+        };
+        let mut buf = Vec::new();
+        ready.write(&mut buf).await.unwrap();
+        let mut r = BufReader::new(&buf[..]);
+        let got = Ready::read(&mut r).await.unwrap();
+        assert_eq!(got.udp_port, 51820);
+        assert!(got.session_id.ct_eq(&ready.session_id));
+    }
+
+    #[tokio::test]
+    async fn error_line_surfaces_message() {
+        let mut buf = Vec::new();
+        write_error(&mut buf, "inbound UDP blocked").await.unwrap();
+        let mut r = BufReader::new(&buf[..]);
+        let err = Ready::read(&mut r).await.unwrap_err();
+        assert!(err.to_string().contains("inbound UDP blocked"));
+    }
+
+    #[tokio::test]
+    async fn skips_blank_lines_before_tag() {
+        crypto::init();
+        let id = Identity::generate().unwrap();
+        let ready = Ready {
+            udp_port: 1234,
+            agent_fp: id.fingerprint,
+            session_id: SessionId::random().unwrap(),
+        };
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"\n\n");
+        ready.write(&mut buf).await.unwrap();
+        let mut r = BufReader::new(&buf[..]);
+        assert_eq!(Ready::read(&mut r).await.unwrap().udp_port, 1234);
+    }
+}

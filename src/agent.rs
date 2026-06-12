@@ -4,12 +4,52 @@
 //! Namespace dialing (`netns.rs`) is layered on later; for now a non-empty
 //! namespace selector is rejected with a clear error.
 
+use std::net::SocketAddr;
+
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::crypto::{self, Identity};
+use crate::handshake::{Hello, Ready, SessionId};
 use crate::proto::{self, StreamHeader};
+use crate::transport;
+
+/// Agent entry point (the `agent` subcommand, launched over SSH).
+///
+/// Reads the [`Hello`] from stdin, binds the QUIC listener pinned to the
+/// client's fingerprint, writes [`Ready`] to stdout, then serves until closed.
+pub async fn run(listen: &str) -> Result<()> {
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let hello = Hello::read(&mut stdin)
+        .await
+        .context("reading bootstrap handshake from stdin")?;
+
+    let identity = Identity::generate()?;
+    let session_id = SessionId::random()?;
+    // The token authorizes SSH-less re-attach; retained for the resilience layer.
+    let _token = hello.token;
+
+    let bind: SocketAddr = listen.parse().context("parsing --listen address")?;
+    let server_cfg = crypto::server_config(&identity, hello.client_fp, &crypto::Timing::default())?;
+    let endpoint = transport::server_endpoint(server_cfg, bind)?;
+    let local = endpoint.local_addr().context("reading bound UDP address")?;
+
+    let ready = Ready {
+        udp_port: local.port(),
+        agent_fp: identity.fingerprint,
+        session_id,
+    };
+    let mut stdout = tokio::io::stdout();
+    ready
+        .write(&mut stdout)
+        .await
+        .context("writing ready handshake to stdout")?;
+
+    serve(endpoint).await
+}
 
 /// Accept connections on `endpoint` until it is closed, serving each one.
 pub async fn serve(endpoint: Endpoint) -> Result<()> {
