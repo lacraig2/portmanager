@@ -1,0 +1,78 @@
+//! Command-line interface definition (clap derive).
+//!
+//! The ergonomic form is `portmanager <host> <spec>...`; explicit subcommands
+//! cover control-socket operations (`add`/`drop`/`list`/`status`) and the
+//! remote `agent` role (launched over SSH, not by hand).
+
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "portmanager",
+    version,
+    about = "Resilient QUIC port forwarder with SSH auto-bootstrap",
+    args_conflicts_with_subcommands = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Default action: start a forwarding session (used when no subcommand is given).
+    #[command(flatten)]
+    pub run: RunArgs,
+
+    /// Increase logging verbosity (-v, -vv).
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Remote host (an SSH alias from ~/.ssh/config or user@host).
+    pub host: Option<String>,
+
+    /// Forward specs, e.g. `8888` or `192.168.4.2:8080->8080` or `podman:web@5432->5432`.
+    pub specs: Vec<String>,
+
+    /// Load a named profile from the config file instead of (or in addition to) specs.
+    #[arg(short, long)]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Add forwards to the running session for HOST (via its control socket).
+    Add {
+        /// Target host whose session to modify.
+        host: String,
+        /// Forward specs to add.
+        specs: Vec<String>,
+    },
+    /// Remove forwards from the running session for HOST.
+    Drop {
+        /// Target host whose session to modify.
+        host: String,
+        /// Forward specs (or local ports) to remove.
+        specs: Vec<String>,
+    },
+    /// List active forwards for HOST's running session.
+    List {
+        /// Target host whose session to query.
+        host: String,
+    },
+    /// Show connection/session status for HOST's running session.
+    Status {
+        /// Target host whose session to query.
+        host: String,
+    },
+    /// Remote agent role. Launched automatically over SSH; not for manual use.
+    #[command(hide = true)]
+    Agent(AgentArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentArgs {
+    /// UDP address to bind the QUIC listener on (`0.0.0.0:0` picks a free port).
+    #[arg(long, default_value = "0.0.0.0:0")]
+    pub listen: String,
+}
