@@ -89,19 +89,18 @@ pub struct Ready {
 }
 
 impl Hello {
-    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
-        let line = format!(
+    /// Serialize to the one-line wire form (newline-terminated).
+    pub fn to_line(&self) -> String {
+        format!(
             "{HELLO_TAG} v{PROTO_VERSION} {} {}\n",
             self.client_fp.to_hex(),
             self.token.to_hex()
-        );
-        w.write_all(line.as_bytes()).await?;
-        w.flush().await?;
-        Ok(())
+        )
     }
 
-    pub async fn read<R: AsyncBufReadExt + Unpin>(r: &mut R) -> Result<Self> {
-        let parts = read_tagged_line(r, HELLO_TAG).await?;
+    /// Parse from a wire line (sync; used by the pre-runtime agent handshake).
+    pub fn parse_line(line: &str) -> Result<Self> {
+        let parts = check_tagged_line(line, HELLO_TAG)?;
         if parts.len() != 4 {
             bail!("malformed HELLO: wrong field count");
         }
@@ -110,23 +109,33 @@ impl Hello {
             token: Token::from_hex(&parts[3])?,
         })
     }
-}
 
-impl Ready {
     pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
-        let line = format!(
-            "{READY_TAG} v{PROTO_VERSION} {} {} {}\n",
-            self.udp_port,
-            self.agent_fp.to_hex(),
-            self.session_id.to_hex()
-        );
-        w.write_all(line.as_bytes()).await?;
+        w.write_all(self.to_line().as_bytes()).await?;
         w.flush().await?;
         Ok(())
     }
 
     pub async fn read<R: AsyncBufReadExt + Unpin>(r: &mut R) -> Result<Self> {
-        let parts = read_tagged_line(r, READY_TAG).await?;
+        let line = read_nonempty_line(r, HELLO_TAG).await?;
+        Self::parse_line(&line)
+    }
+}
+
+impl Ready {
+    /// Serialize to the one-line wire form (newline-terminated).
+    pub fn to_line(&self) -> String {
+        format!(
+            "{READY_TAG} v{PROTO_VERSION} {} {} {}\n",
+            self.udp_port,
+            self.agent_fp.to_hex(),
+            self.session_id.to_hex()
+        )
+    }
+
+    /// Parse from a wire line (sync).
+    pub fn parse_line(line: &str) -> Result<Self> {
+        let parts = check_tagged_line(line, READY_TAG)?;
         if parts.len() != 5 {
             bail!("malformed READY: wrong field count");
         }
@@ -137,40 +146,52 @@ impl Ready {
             session_id: SessionId::from_hex(&parts[4])?,
         })
     }
+
+    pub async fn write<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        w.write_all(self.to_line().as_bytes()).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read<R: AsyncBufReadExt + Unpin>(r: &mut R) -> Result<Self> {
+        let line = read_nonempty_line(r, READY_TAG).await?;
+        Self::parse_line(&line)
+    }
 }
 
 /// Write a `PM-ERROR <message>` line.
 pub async fn write_error<W: AsyncWrite + Unpin>(w: &mut W, message: &str) -> Result<()> {
-    let line = format!("{ERROR_TAG} {message}\n");
-    w.write_all(line.as_bytes()).await?;
+    w.write_all(error_line(message).as_bytes()).await?;
     w.flush().await?;
     Ok(())
 }
 
-/// Read one non-empty line and split it, verifying the expected tag and version.
-/// A `PM-ERROR` line is surfaced as an error with its message.
-async fn read_tagged_line<'a, R: AsyncBufReadExt + Unpin>(
+/// Read one non-empty line (skipping blanks, e.g. stray shell output).
+async fn read_nonempty_line<R: AsyncBufReadExt + Unpin>(
     r: &mut R,
     expected_tag: &str,
-) -> Result<Vec<String>> {
-    // Skip blank lines (e.g. stray shell output) until a tagged line appears.
-    let line = loop {
+) -> Result<String> {
+    loop {
         let mut line = String::new();
         let n = r.read_line(&mut line).await.context("reading handshake line")?;
         if n == 0 {
             bail!("connection closed before {expected_tag}");
         }
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
         }
-        break trimmed.to_string();
-    };
+    }
+}
 
+/// Split a line and verify the expected tag and version. A `PM-ERROR` line is
+/// surfaced as an error carrying its message.
+fn check_tagged_line(line: &str, expected_tag: &str) -> Result<Vec<String>> {
+    let line = line.trim();
     let parts: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     match parts.first().map(String::as_str) {
         Some(t) if t == ERROR_TAG => {
-            let msg = line.strip_prefix(ERROR_TAG).unwrap_or(&line).trim().to_string();
+            let msg = line.strip_prefix(ERROR_TAG).unwrap_or(line).trim().to_string();
             bail!("agent reported: {msg}");
         }
         Some(t) if t == expected_tag => {}
@@ -181,6 +202,11 @@ async fn read_tagged_line<'a, R: AsyncBufReadExt + Unpin>(
         bail!("protocol version mismatch: agent sent {version:?}");
     }
     Ok(parts)
+}
+
+/// Format a `PM-ERROR` line (sync).
+pub fn error_line(message: &str) -> String {
+    format!("{ERROR_TAG} {message}\n")
 }
 
 #[cfg(test)]

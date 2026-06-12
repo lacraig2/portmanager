@@ -11,12 +11,20 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::io::BufReader;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 use crate::crypto::{Fingerprint, Identity, Timing};
 use crate::handshake::{Hello, Ready, SessionId, Token};
 
+/// Connection timeout for every SSH invocation, so recovery attempts during an
+/// outage fail fast instead of hanging the supervisor.
+const SSH_CONNECT_TIMEOUT: &str = "ConnectTimeout=10";
+
 /// Everything the client needs to connect to (and later re-attach to) the agent.
+///
+/// The agent daemonizes after the handshake (mosh-server style), so no SSH
+/// process is held open: its lifetime is governed by its grace window and the
+/// explicit shutdown close. That's what lets the session survive SSH death.
 pub struct AgentSession {
     /// `hostname:udp_port` to dial the QUIC listener.
     pub quic_target: String,
@@ -28,8 +36,6 @@ pub struct AgentSession {
     pub session_id: SessionId,
     /// Shared re-attach secret.
     pub token: Token,
-    /// The live SSH control process; dropping it tears down the agent.
-    pub control: Child,
 }
 
 /// Map `uname -s -m` output to the agent's cross-compile target triple.
@@ -81,8 +87,11 @@ pub async fn bootstrap(host: &str, listen: &str) -> Result<AgentSession> {
     let client_id = Identity::generate()?;
     let token = Token::random()?;
 
-    // Launch the agent over SSH with piped stdio for the handshake.
+    // Launch the agent over SSH with piped stdio for the handshake. The agent
+    // daemonizes after replying READY, so this ssh process exits on its own.
     let mut child = Command::new("ssh")
+        .arg("-o")
+        .arg(SSH_CONNECT_TIMEOUT)
         .arg(host)
         .arg(&remote_path)
         .arg("agent")
@@ -91,7 +100,6 @@ pub async fn bootstrap(host: &str, listen: &str) -> Result<AgentSession> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
         .spawn()
         .context("launching agent over SSH")?;
 
@@ -111,13 +119,9 @@ pub async fn bootstrap(host: &str, listen: &str) -> Result<AgentSession> {
         .await
         .context("agent did not complete handshake")?;
 
-    // Keep the reader draining so the agent's stderr/stdout don't block it.
+    // The agent has detached; reap the ssh process in the background.
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut line = String::new();
-        while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-            line.clear();
-        }
+        let _ = child.wait().await;
     });
 
     Ok(AgentSession {
@@ -126,7 +130,6 @@ pub async fn bootstrap(host: &str, listen: &str) -> Result<AgentSession> {
         client_id,
         session_id: ready.session_id,
         token,
-        control: child,
     })
 }
 
@@ -159,7 +162,7 @@ async fn ssh_g(host: &str) -> Result<String> {
 async fn ssh_capture(host: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("ssh")
         .arg("-o")
-        .arg("BatchMode=no")
+        .arg(SSH_CONNECT_TIMEOUT)
         .arg(host)
         .args(args)
         .output()
@@ -186,6 +189,8 @@ async fn deploy_agent(host: &str, exe: &Path, triple: &str) -> Result<String> {
 
     // Already deployed (the hash is in the name, so existence implies a match)?
     let exists = Command::new("ssh")
+        .arg("-o")
+        .arg(SSH_CONNECT_TIMEOUT)
         .arg(host)
         .arg(format!("test -x {remote_path}"))
         .status()

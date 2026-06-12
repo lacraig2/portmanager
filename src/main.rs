@@ -1,4 +1,7 @@
 //! portmanager binary entry point.
+//!
+//! `main` is sync on purpose: the agent role daemonizes (forks) after its
+//! stdio handshake, which must happen before any tokio runtime exists.
 
 use std::time::Duration;
 
@@ -9,30 +12,38 @@ use tracing_subscriber::EnvFilter;
 
 use portmanager::cli::{self, Cli, Command};
 use portmanager::forward::ForwardSpec;
-use portmanager::{agent, bootstrap, client, crypto, transport};
+use portmanager::supervisor::{Status, Supervisor};
+use portmanager::{agent, client, crypto};
 
-/// How long to wait for the QUIC handshake before assuming inbound UDP is blocked.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     crypto::init();
 
     match cli.command {
-        Some(Command::Agent(args)) => agent::run(&args.listen).await,
+        Some(Command::Agent(args)) => agent::run(
+            &args.listen,
+            Duration::from_secs(args.grace_secs),
+            args.foreground,
+        ),
         Some(Command::Add { .. })
         | Some(Command::Drop { .. })
         | Some(Command::List { .. })
         | Some(Command::Status { .. }) => {
             bail!("control-socket subcommands not yet implemented");
         }
-        None => run_client(cli.run).await,
+        None => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?;
+            runtime.block_on(run_client(cli.run))
+        }
     }
 }
 
-/// Default action: bootstrap an agent on the host and serve the forward set.
+/// Default action: bootstrap an agent on the host and serve the forward set
+/// under the never-give-up supervisor.
 async fn run_client(args: cli::RunArgs) -> Result<()> {
     let host = args
         .host
@@ -43,47 +54,45 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         bail!("no forwards given; pass at least one spec (e.g. 8888 or 192.168.4.2:8080->8080)");
     }
 
-    info!(%host, count = forwards.len(), "bootstrapping agent over SSH");
-    let session = bootstrap::bootstrap(&host, "0.0.0.0:0")
+    let supervisor = Supervisor::start(host, "0.0.0.0:0".to_string())
         .await
-        .context("bootstrapping remote agent")?;
-
-    let client_cfg =
-        crypto::client_config(&session.client_id, session.agent_fp, &bootstrap::default_timing())?;
-    let endpoint = transport::client_endpoint(client_cfg)?;
-
-    let addr = tokio::net::lookup_host(&session.quic_target)
-        .await
-        .with_context(|| format!("resolving {}", session.quic_target))?
-        .next()
-        .with_context(|| format!("no address for {}", session.quic_target))?;
-
-    let conn = match tokio::time::timeout(CONNECT_TIMEOUT, transport::connect(&endpoint, addr)).await
-    {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(e)) => return Err(e).context("connecting to agent"),
-        Err(_) => bail!(
-            "QUIC handshake to {} timed out — the remote likely blocks inbound UDP on that port. \
-             portmanager needs inbound UDP (not just SSH/22) to reach the agent.",
-            session.quic_target
-        ),
-    };
-    info!(target = %session.quic_target, "connected to agent");
+        .map_err(|e| {
+            e.context(
+                "session bootstrap failed — note the remote must allow inbound UDP \
+                 (not just SSH/22) for the QUIC channel",
+            )
+        })?;
 
     for forward in forwards {
-        client::bind_forward(conn.clone(), forward)
+        client::bind_forward(supervisor.slot.clone(), forward)
             .await
             .context("binding forward")?;
     }
 
+    // Mosh-style status: announce transitions until Ctrl-C.
+    let mut status = supervisor.status.clone();
     info!("session up — Ctrl-C to stop");
-    tokio::select! {
-        reason = conn.closed() => warn!(%reason, "agent connection closed"),
-        _ = tokio::signal::ctrl_c() => info!("shutting down"),
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down");
+                supervisor.shutdown().await;
+                return Ok(());
+            }
+            changed = status.changed() => {
+                if changed.is_err() {
+                    bail!("supervisor exited unexpectedly");
+                }
+                match &*status.borrow_and_update() {
+                    Status::Connected => info!("[connected]"),
+                    Status::Reconnecting { attempt } => {
+                        warn!("[reconnecting — attempt {attempt}]");
+                    }
+                    Status::Bootstrapping => warn!("[re-bootstrapping over SSH]"),
+                }
+            }
+        }
     }
-    // Dropping the session kills the SSH control process (kill_on_drop).
-    drop(session);
-    Ok(())
 }
 
 /// Parse a list of forward-spec strings, surfacing the offending spec on error.

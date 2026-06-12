@@ -75,4 +75,14 @@ pub struct AgentArgs {
     /// UDP address to bind the QUIC listener on (`0.0.0.0:0` picks a free port).
     #[arg(long, default_value = "0.0.0.0:0")]
     pub listen: String,
+
+    /// Seconds to hold the session open with no client attached before exiting.
+    /// This is the re-attach window for roaming/sleeping clients.
+    #[arg(long, default_value_t = 300)]
+    pub grace_secs: u64,
+
+    /// Stay attached to the launching terminal/SSH session instead of
+    /// daemonizing (used by tests and for debugging).
+    #[arg(long)]
+    pub foreground: bool,
 }
