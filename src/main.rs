@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -17,6 +18,8 @@ use portmanager::control::{self, Request, Response};
 use portmanager::forward::ForwardSpec;
 use portmanager::supervisor::{Status, Supervisor};
 use portmanager::{agent, config, crypto, discovery, netns};
+
+const DAEMON_CHILD_ENV: &str = "PORTMANAGER_DAEMON_CHILD";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -31,7 +34,14 @@ fn main() -> Result<()> {
         ),
         Some(Command::NsHelper) => netns::run_helper(),
         Some(cmd) => block_on(run_control_command(cmd)),
-        None => block_on(run_client(cli.run)),
+        None => {
+            if cli.run.daemon && std::env::var_os(DAEMON_CHILD_ENV).is_none() {
+                spawn_daemon(cli.verbose)?;
+                Ok(())
+            } else {
+                block_on(run_client(cli.run))
+            }
+        }
     }
 }
 
@@ -77,6 +87,7 @@ async fn run_control_command(cmd: Command) -> Result<()> {
         }
         Command::List { host } => (host, vec![Request::List]),
         Command::Status { host } => (host, vec![Request::Status]),
+        Command::Stop { host } => (host, vec![Request::Stop]),
         Command::Agent(_) | Command::NsHelper => unreachable!("handled in main"),
     };
 
@@ -161,10 +172,12 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         )
     };
 
-    // Dedup by local port (CLI specs win over profile/state entries).
+    // Dedup by remote target (CLI specs win over profile/state entries). Local
+    // port conflicts are resolved while binding so omitted local ports can
+    // fall back instead of being discarded here.
     {
         let mut seen = std::collections::HashSet::new();
-        forwards.retain(|f| seen.insert(f.local_port));
+        forwards.retain(|f| seen.insert((f.ns.to_wire(), f.remote_host.clone(), f.remote_port)));
     }
     if forwards.is_empty() && rules.is_empty() {
         bail!(
@@ -187,11 +200,14 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         forward_set.add(forward).await.context("binding forward")?;
     }
 
+    let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+
     // Control socket: live add/drop/list/status.
     let control_task = tokio::spawn(control::serve(control::ControlCtx {
         host: host.clone(),
         forwards: forward_set.clone(),
         status: supervisor.status.clone(),
+        shutdown: Some(shutdown_tx),
         persist,
     }));
 
@@ -215,6 +231,13 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
                 supervisor.shutdown().await;
                 return Ok(());
             }
+            _ = shutdown_rx.recv() => {
+                info!("shutting down");
+                control_task.abort();
+                control::cleanup(&host);
+                supervisor.shutdown().await;
+                return Ok(());
+            }
             changed = status.changed() => {
                 if changed.is_err() {
                     control::cleanup(&host);
@@ -230,6 +253,59 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
             }
         }
     }
+}
+
+fn spawn_daemon(verbose: u8) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let log_dir = directories::BaseDirs::new()
+        .map(|d| d.cache_dir().join("portmanager"))
+        .unwrap_or_else(|| std::env::temp_dir().join("portmanager"));
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("creating log directory {}", log_dir.display()))?;
+    let log_path = log_dir.join("client.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .context("opening /dev/null")?;
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1))
+        .env(DAEMON_CHILD_ENV, "1")
+        .stdin(Stdio::from(
+            devnull.try_clone().context("cloning /dev/null")?,
+        ))
+        .stdout(Stdio::from(devnull))
+        .stderr(Stdio::from(log));
+
+    // SAFETY: this hook runs in the freshly spawned child immediately before
+    // exec. Only async-signal-safe setsid(2) is called.
+    unsafe {
+        cmd.pre_exec(|| {
+            if nix::libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().context("spawning daemon client")?;
+    if verbose > 0 {
+        eprintln!(
+            "started portmanager daemon pid={} log={}",
+            child.id(),
+            log_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Parse a list of forward-spec strings, surfacing the offending spec on error.

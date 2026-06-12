@@ -88,15 +88,54 @@ impl ForwardSet {
         }
     }
 
-    /// Bind and start a forward. Returns the actual local address (resolves
-    /// port 0). Fails if the local port is already in the set.
+    /// Bind and start a forward. Returns the actual local address. Omitted
+    /// local ports prefer the remote port and fall back to a free ephemeral
+    /// port if that local port is unavailable.
     pub async fn add(&self, spec: ForwardSpec) -> Result<SocketAddr> {
         let mut active = self.active.lock().await;
-        if spec.local_port != 0 && active.contains_key(&spec.local_port) {
+        let mut bind_spec = spec.clone();
+        if bind_spec.local_port != 0 && active.contains_key(&bind_spec.local_port) {
+            if bind_spec.local_port_auto {
+                bind_spec.local_port = 0;
+            } else {
+                bail!("local port {} is already forwarded", bind_spec.local_port);
+            }
+        }
+
+        let preferred_port = bind_spec.local_port;
+        let (local, task) = match bind_forward(self.slot.clone(), bind_spec.clone()).await {
+            Ok(bound) => bound,
+            Err(e) if bind_spec.local_port_auto && preferred_port != 0 => {
+                warn!(
+                    local_port = preferred_port,
+                    error = %e,
+                    "preferred local port unavailable; falling back to a free port"
+                );
+                bind_spec.local_port = 0;
+                bind_forward(self.slot.clone(), bind_spec.clone()).await?
+            }
+            Err(e) => return Err(e),
+        };
+
+        bind_spec.local_port = local.port();
+        if local.port() != preferred_port && bind_spec.local_port_auto {
+            info!(
+                preferred = preferred_port,
+                actual = local.port(),
+                "forward used fallback local port"
+            );
+        }
+        if active.contains_key(&local.port()) {
             bail!("local port {} is already forwarded", spec.local_port);
         }
-        let (local, task) = bind_forward(self.slot.clone(), spec.clone()).await?;
-        active.insert(local.port(), ActiveForward { spec, local, task });
+        active.insert(
+            local.port(),
+            ActiveForward {
+                spec: bind_spec,
+                local,
+                task,
+            },
+        );
         Ok(local)
     }
 
@@ -200,5 +239,53 @@ async fn serve_one(mut slot: ConnSlot, forward: ForwardSpec, tcp: TcpStream) -> 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::forward::NsSpec;
+
+    fn spec(local_port: u16, local_port_auto: bool) -> ForwardSpec {
+        ForwardSpec {
+            ns: NsSpec::Host,
+            remote_host: "127.0.0.1".into(),
+            remote_port: local_port,
+            local_addr: Ipv4Addr::LOCALHOST.into(),
+            local_port,
+            local_port_auto,
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_local_port_falls_back_when_preferred_port_is_busy() {
+        let busy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let preferred = busy.local_addr().unwrap().port();
+        let (_slot_tx, slot_rx) = conn_slot(None);
+        let forwards = ForwardSet::new(slot_rx);
+
+        let local = forwards.add(spec(preferred, true)).await.unwrap();
+
+        assert_ne!(local.port(), preferred);
+        let active = forwards.list().await;
+        assert_eq!(active[0].0.local_port, local.port());
+        assert!(active[0].0.local_port_auto);
+
+        forwards.remove(local.port()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_local_port_stays_strict_when_busy() {
+        let busy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let preferred = busy.local_addr().unwrap().port();
+        let (_slot_tx, slot_rx) = conn_slot(None);
+        let forwards = ForwardSet::new(slot_rx);
+
+        assert!(forwards.add(spec(preferred, false)).await.is_err());
     }
 }

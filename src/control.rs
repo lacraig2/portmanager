@@ -3,7 +3,7 @@
 //!
 //! The running client listens on a Unix socket at
 //! `$XDG_RUNTIME_DIR/portmanager/<host>.sock` (mode 0700 directory). The
-//! `portmanager add|drop|list|status <host> ...` subcommands connect to it.
+//! `portmanager add|drop|list|status|stop <host> ...` subcommands connect to it.
 //! Protocol: one JSON request line in, one JSON response line out.
 
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::client::ForwardSet;
@@ -27,6 +27,7 @@ pub enum Request {
     Drop { spec: String },
     List,
     Status,
+    Stop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,6 +82,8 @@ pub struct ControlCtx {
     pub host: String,
     pub forwards: Arc<ForwardSet>,
     pub status: watch::Receiver<Status>,
+    /// Optional shutdown signal for the owning session.
+    pub shutdown: Option<mpsc::UnboundedSender<()>>,
     /// Where live changes are written back (host state or named profile).
     pub persist: PersistTarget,
 }
@@ -122,46 +125,85 @@ async fn handle(stream: UnixStream, ctx: &ControlCtx) -> Result<()> {
     let Some(line) = lines.next_line().await? else {
         return Ok(());
     };
-    let response = match serde_json::from_str::<Request>(&line) {
+    let (response, shutdown) = match serde_json::from_str::<Request>(&line) {
         Ok(req) => dispatch(req, ctx).await,
-        Err(e) => Response::Error {
-            message: format!("bad request: {e}"),
-        },
+        Err(e) => (
+            Response::Error {
+                message: format!("bad request: {e}"),
+            },
+            false,
+        ),
     };
     let mut out = serde_json::to_string(&response)?;
     out.push('\n');
     write.write_all(out.as_bytes()).await?;
+    write.shutdown().await?;
+    if shutdown && let Some(tx) = &ctx.shutdown {
+        let _ = tx.send(());
+    }
     Ok(())
 }
 
-async fn dispatch(req: Request, ctx: &ControlCtx) -> Response {
+async fn dispatch(req: Request, ctx: &ControlCtx) -> (Response, bool) {
     match req {
         Request::Add { spec } => match add_forward(&spec, ctx).await {
-            Ok(local) => Response::Ok {
-                message: format!("forward up on {local}"),
-            },
-            Err(e) => Response::Error {
-                message: format!("{e:#}"),
-            },
+            Ok(local) => (
+                Response::Ok {
+                    message: format!("forward up on {local}"),
+                },
+                false,
+            ),
+            Err(e) => (
+                Response::Error {
+                    message: format!("{e:#}"),
+                },
+                false,
+            ),
         },
         Request::Drop { spec } => match drop_forward(&spec, ctx).await {
-            Ok(msg) => Response::Ok { message: msg },
-            Err(e) => Response::Error {
-                message: format!("{e:#}"),
+            Ok(msg) => (Response::Ok { message: msg }, false),
+            Err(e) => (
+                Response::Error {
+                    message: format!("{e:#}"),
+                },
+                false,
+            ),
+        },
+        Request::List => (
+            Response::Forwards {
+                entries: entries(ctx).await,
             },
-        },
-        Request::List => Response::Forwards {
-            entries: entries(ctx).await,
-        },
+            false,
+        ),
         Request::Status => {
             let state = match &*ctx.status.borrow() {
                 Status::Connected => "connected".to_string(),
                 Status::Reconnecting { attempt } => format!("reconnecting (attempt {attempt})"),
                 Status::Bootstrapping => "bootstrapping".to_string(),
             };
-            Response::StatusIs {
-                state,
-                entries: entries(ctx).await,
+            (
+                Response::StatusIs {
+                    state,
+                    entries: entries(ctx).await,
+                },
+                false,
+            )
+        }
+        Request::Stop => {
+            if ctx.shutdown.is_some() {
+                (
+                    Response::Ok {
+                        message: "shutting down".into(),
+                    },
+                    true,
+                )
+            } else {
+                (
+                    Response::Error {
+                        message: "this session does not support remote shutdown".into(),
+                    },
+                    false,
+                )
             }
         }
     }
@@ -226,6 +268,9 @@ pub fn display_spec(spec: &ForwardSpec) -> String {
     } else {
         format!("{ns}@")
     };
+    if spec.local_port_auto && spec.local_port == spec.remote_port {
+        return format!("{prefix}{}:{}", spec.remote_host, spec.remote_port);
+    }
     format!(
         "{prefix}{}:{}->{}",
         spec.remote_host, spec.remote_port, spec.local_port
@@ -275,6 +320,12 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<Request>(&s).unwrap(),
             Request::Add { .. }
+        ));
+
+        let s = serde_json::to_string(&Request::Stop).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Request>(&s).unwrap(),
+            Request::Stop
         ));
 
         let resp = Response::StatusIs {

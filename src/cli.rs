@@ -37,6 +37,10 @@ pub struct RunArgs {
     /// Load a named profile from the config file instead of (or in addition to) specs.
     #[arg(short, long)]
     pub profile: Option<String>,
+
+    /// Start the local forwarding client in the background.
+    #[arg(long)]
+    pub daemon: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,6 +67,11 @@ pub enum Command {
     /// Show connection/session status for HOST's running session.
     Status {
         /// Target host whose session to query.
+        host: String,
+    },
+    /// Stop HOST's running background or foreground session.
+    Stop {
+        /// Target host whose session to stop.
         host: String,
     },
     /// Remote agent role. Launched automatically over SSH; not for manual use.

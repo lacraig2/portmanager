@@ -15,12 +15,13 @@
 //! ```
 //!
 //! Examples:
-//! - `8888`                          -> dial 127.0.0.1:8888, listen on 8888
+//! - `8888`                          -> dial 127.0.0.1:8888, prefer local 8888
 //! - `192.168.4.2:8080->8080`        -> dial 192.168.4.2:8080, listen on 8080
 //! - `podman:web@10.88.0.5:5432->5432` -> dial 10.88.0.5:5432 *inside* the
 //!   `web` container's netns, listen on 5432
 //!
-//! When `->LOCALPORT` is omitted, the local port mirrors the remote port.
+//! When `->LOCALPORT` is omitted, the local port prefers the remote port and
+//! falls back to an ephemeral free port if that local port is unavailable.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -116,6 +117,8 @@ pub struct ForwardSpec {
     pub local_addr: IpAddr,
     /// Local port the client listens on.
     pub local_port: u16,
+    /// Whether the local port was omitted and may fall back if unavailable.
+    pub local_port_auto: bool,
 }
 
 impl ForwardSpec {
@@ -167,6 +170,7 @@ impl FromStr for ForwardSpec {
             remote_port,
             local_addr: Self::DEFAULT_LOCAL_ADDR,
             local_port,
+            local_port_auto: local_part.is_none(),
         })
     }
 }
@@ -240,6 +244,7 @@ mod tests {
         assert_eq!(f.remote_host, "127.0.0.1");
         assert_eq!(f.remote_port, 8888);
         assert_eq!(f.local_port, 8888);
+        assert!(f.local_port_auto);
         assert_eq!(f.local_addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
@@ -250,6 +255,7 @@ mod tests {
         assert_eq!(f.remote_host, "192.168.4.2");
         assert_eq!(f.remote_port, 8080);
         assert_eq!(f.local_port, 8080);
+        assert!(!f.local_port_auto);
     }
 
     #[test]
@@ -258,6 +264,7 @@ mod tests {
         assert_eq!(f.remote_host, "10.0.0.5");
         assert_eq!(f.remote_port, 443);
         assert_eq!(f.local_port, 8443);
+        assert!(!f.local_port_auto);
     }
 
     #[test]
@@ -266,6 +273,7 @@ mod tests {
         assert_eq!(f.remote_host, "db.internal");
         assert_eq!(f.remote_port, 5432);
         assert_eq!(f.local_port, 5432);
+        assert!(f.local_port_auto);
     }
 
     #[test]

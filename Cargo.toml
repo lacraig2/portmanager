@@ -11,7 +11,6 @@ directories = "6.0.0"
 getrandom = "0.4.2"
 hex = "0.4.3"
 nix = { version = "0.31.3", features = ["net", "socket", "sched", "process", "user", "fs", "uio"] }
-procfs = "0.18.0"
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rcgen = "0.14.7"
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
@@ -24,3 +23,6 @@ tokio-util = "0.7.18"
 toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.18.0"

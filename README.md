@@ -15,6 +15,14 @@ INFO forward up local=127.0.0.1:5432 target=10.88.0.5:5432 ns=podman:web
 INFO session up — Ctrl-C to stop
 ```
 
+Run the local client in the background with `--daemon`:
+
+```console
+$ portmanager --daemon myhost 8888 db.internal:5432
+$ portmanager status myhost
+$ portmanager stop myhost
+```
+
 ## Why
 
 - **mosh can't forward ports** (terminal only), **VSCode forwarding needs
@@ -44,12 +52,17 @@ INFO session up — Ctrl-C to stop
 ```
 [NS@][HOST:]PORT[->LOCALPORT]
 
-8888                          # remote 127.0.0.1:8888 -> local 8888
+8888                          # remote 127.0.0.1:8888 -> local 8888, or a free port if busy
+192.168.4.2:8080              # remote 192.168.4.2:8080 -> local 8080, or a free port if busy
 192.168.4.2:8080->8080        # a host on the remote's network
 podman:web@10.88.0.5:5432->5432   # inside a rootless container's netns
 pid:1234@8080                 # inside any process's netns (yours)
 nspath:/run/user/1000/netns/x@80  # explicit namespace file
 ```
+
+If `->LOCALPORT` is omitted, portmanager prefers the same local port and falls
+back to an available ephemeral port. If `->LOCALPORT` is present, that local
+port is strict and binding fails if it is unavailable.
 
 Namespace dialing enters rootless namespaces (userns+netns, the
 `podman unshare` trick) via a resident per-namespace helper that hands
@@ -63,6 +76,7 @@ $ portmanager add  myhost 9000->9000   # bind on the running session, no restart
 $ portmanager drop myhost 8888
 $ portmanager list myhost
 $ portmanager status myhost
+$ portmanager stop myhost
 ```
 
 Changes persist: a plain `portmanager myhost` resumes the set you ended with

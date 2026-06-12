@@ -64,6 +64,7 @@ async fn forwards_bytes_end_to_end() {
         remote_port: echo_addr.port(),
         local_addr: Ipv4Addr::LOCALHOST.into(),
         local_port: 0,
+        local_port_auto: false,
     };
     let (local_addr, _task) = client::bind_forward(slot_rx, forward).await.unwrap();
 
@@ -121,6 +122,7 @@ async fn listener_survives_reconnect() {
         remote_port: echo_addr.port(),
         local_addr: Ipv4Addr::LOCALHOST.into(),
         local_port: 0,
+        local_port_auto: false,
     };
     let (local_addr, _task) = client::bind_forward(slot_rx, forward).await.unwrap();
 

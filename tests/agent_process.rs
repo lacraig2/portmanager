@@ -84,6 +84,7 @@ async fn agent_binary_bootstraps_and_forwards() {
         remote_port: echo_addr.port(),
         local_addr: Ipv4Addr::LOCALHOST.into(),
         local_port: 0,
+        local_port_auto: false,
     };
     let (local_addr, _task) = client::bind_forward(slot_rx, forward).await.unwrap();
 

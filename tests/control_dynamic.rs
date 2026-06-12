@@ -66,6 +66,7 @@ async fn control_socket_add_drop_list_status() {
         host: host.clone(),
         forwards: forwards.clone(),
         status: status_rx,
+        shutdown: None,
         persist: portmanager::config::PersistTarget::HostState { host: host.clone() },
     };
     let server = tokio::spawn(control::serve(ctx));

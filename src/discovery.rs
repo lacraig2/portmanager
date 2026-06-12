@@ -89,6 +89,7 @@ async fn scan_all(namespaces: &[NsSpec]) -> Vec<Listener> {
 }
 
 /// List LISTEN sockets in one namespace via /proc (no setns).
+#[cfg(target_os = "linux")]
 fn scan_one(ns: &NsSpec) -> Result<Vec<Listener>> {
     use procfs::net::TcpState;
     let wire = ns.to_wire();
@@ -113,6 +114,12 @@ fn scan_one(ns: &NsSpec) -> Result<Vec<Listener>> {
         }
     }
     Ok(out)
+}
+
+/// Non-Linux platforms do not have Linux-style `/proc/<pid>/net/tcp` tables.
+#[cfg(not(target_os = "linux"))]
+fn scan_one(_ns: &NsSpec) -> Result<Vec<Listener>> {
+    Ok(Vec::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +257,7 @@ async fn consider(
         remote_port: l.port,
         local_addr: std::net::Ipv4Addr::LOCALHOST.into(),
         local_port: preferred.unwrap_or(0),
+        local_port_auto: false,
     };
 
     // Preferred port may collide; fall back to ephemeral.
