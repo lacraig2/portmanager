@@ -183,11 +183,11 @@ impl Helper {
 
         let mut fd: Option<OwnedFd> = None;
         for cmsg in msg.cmsgs().context("parsing control messages")? {
-            if let nix::sys::socket::ControlMessageOwned::ScmRights(fds) = cmsg {
-                if let Some(&raw) = fds.first() {
-                    // SAFETY: freshly received via SCM_RIGHTS; we own it.
-                    fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
-                }
+            if let nix::sys::socket::ControlMessageOwned::ScmRights(fds) = cmsg
+                && let Some(&raw) = fds.first()
+            {
+                // SAFETY: freshly received via SCM_RIGHTS; we own it.
+                fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
             }
         }
 

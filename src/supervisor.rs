@@ -188,16 +188,16 @@ async fn monitor_loop(mut ctx: MonitorCtx) {
 
             // The old socket may be bound to a dead interface after sleep;
             // refresh it occasionally so attempts use the current network.
-            if attempt % 2 == 0 {
-                if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                    let _ = sock.set_nonblocking(true);
-                    let _ = ctx.endpoint.rebind(sock);
-                }
+            if attempt.is_multiple_of(2)
+                && let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0")
+            {
+                let _ = sock.set_nonblocking(true);
+                let _ = ctx.endpoint.rebind(sock);
             }
 
             // Tier 3: after a cycle of failed re-attaches, assume the agent is
             // gone and re-bootstrap over SSH.
-            if attempt % REATTACH_ATTEMPTS_PER_CYCLE == 0 {
+            if attempt.is_multiple_of(REATTACH_ATTEMPTS_PER_CYCLE) {
                 ctx.status_tx.send_replace(Status::Bootstrapping);
                 info!("re-bootstrapping agent over SSH");
                 match bootstrap::bootstrap(&ctx.host, &ctx.listen).await {
