@@ -101,7 +101,9 @@ local = "same"       # mirror remote port; fall back to a free one
   re-sync). Listeners stay bound and the session re-attaches; apps reconnect.
   Brief roaming within a live QUIC connection is fully lossless.
 - The remote must allow **inbound UDP** on the agent's port (not just SSH/22).
-  The client detects the blocked case and says so.
+  By default portmanager uses the mosh-style UDP range `60000-61000`; use
+  `--remote-udp 0.0.0.0:PORT` if the remote firewall only allows one specific
+  UDP port.
 - The agent's UDP listener is mutually authenticated, but it *is* a listening
   port run with your remote user's privileges; the grace window
   (`--grace-secs`, default 300) bounds how long it outlives a client.

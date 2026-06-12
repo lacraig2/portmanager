@@ -36,7 +36,7 @@ fn main() -> Result<()> {
         Some(cmd) => block_on(run_control_command(cmd)),
         None => {
             if cli.run.daemon && std::env::var_os(DAEMON_CHILD_ENV).is_none() {
-                spawn_daemon(cli.verbose)?;
+                spawn_daemon(&cli.run, cli.verbose)?;
                 Ok(())
             } else {
                 block_on(run_client(cli.run))
@@ -186,7 +186,7 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         );
     }
 
-    let supervisor = Supervisor::start(host.clone(), "0.0.0.0:0".to_string())
+    let supervisor = Supervisor::start(host.clone(), args.remote_udp.clone())
         .await
         .map_err(|e| {
             e.context(
@@ -256,10 +256,11 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn spawn_daemon(verbose: u8) -> Result<()> {
+fn spawn_daemon(args: &cli::RunArgs, verbose: u8) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
+    let host = daemon_host(args)?;
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_dir = directories::BaseDirs::new()
         .map(|d| d.cache_dir().join("portmanager"))
@@ -298,7 +299,8 @@ fn spawn_daemon(verbose: u8) -> Result<()> {
         });
     }
 
-    let child = cmd.spawn().context("spawning daemon client")?;
+    let mut child = cmd.spawn().context("spawning daemon client")?;
+    wait_for_daemon(&host, &log_path, &mut child)?;
     if verbose > 0 {
         eprintln!(
             "started portmanager daemon pid={} log={}",
@@ -309,8 +311,39 @@ fn spawn_daemon(verbose: u8) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn wait_for_daemon(
+    host: &str,
+    log_path: &std::path::Path,
+    child: &mut std::process::Child,
+) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    let path = control::socket_path(host)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if UnixStream::connect(&path).is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().context("checking daemon child status")? {
+            bail!(
+                "daemon exited before control socket came up (status {status}); see {}",
+                log_path.display()
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for daemon control socket {} for {host:?}; see {}",
+                path.display(),
+                log_path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[cfg(windows)]
-fn spawn_daemon(verbose: u8) -> Result<()> {
+fn spawn_daemon(_args: &cli::RunArgs, verbose: u8) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
 
@@ -358,8 +391,26 @@ fn spawn_daemon(verbose: u8) -> Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn spawn_daemon(_verbose: u8) -> Result<()> {
+fn spawn_daemon(_args: &cli::RunArgs, _verbose: u8) -> Result<()> {
     bail!("daemon mode is not supported on this platform")
+}
+
+fn daemon_host(args: &cli::RunArgs) -> Result<String> {
+    if let Some(host) = &args.host {
+        return Ok(host.clone());
+    }
+    if let Some(name) = &args.profile {
+        let config = config::load_config()?;
+        let profile = config
+            .profiles
+            .get(name)
+            .with_context(|| format!("no profile {name:?} in config.toml"))?;
+        if !profile.host.is_empty() {
+            return Ok(profile.host.clone());
+        }
+        bail!("profile {name:?} has no host and none was given on the CLI");
+    }
+    bail!("no host given; usage: portmanager --daemon <host> <spec>...");
 }
 
 /// Parse a list of forward-spec strings, surfacing the offending spec on error.

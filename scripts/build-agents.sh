@@ -3,13 +3,14 @@
 # install them into the dist cache the client deploys from
 # (~/.cache/portmanager/dist/agent-<triple>).
 #
-# Tries cargo-zigbuild first (best on macOS), then cross (container-based),
-# then native cargo if a suitable musl-gcc is available.
+# Tries cargo-zigbuild first (best on macOS), then cross on Linux
+# (container-based), then native cargo if a suitable musl-gcc is available.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 DIST="${XDG_CACHE_HOME:-$HOME/.cache}/portmanager/dist"
 mkdir -p "$DIST"
+HOST_OS="$(uname -s)"
 
 build_target() {
     local triple="$1"
@@ -18,7 +19,7 @@ build_target() {
     if command -v cargo-zigbuild >/dev/null 2>&1; then
         rustup target add "$triple" >/dev/null 2>&1 || true
         cargo zigbuild --release --target "$triple"
-    elif command -v cross >/dev/null 2>&1; then
+    elif [[ "$HOST_OS" == "Linux" ]] && command -v cross >/dev/null 2>&1; then
         cross build --release --target "$triple"
     elif command -v "$cc" >/dev/null 2>&1; then
         rustup target add "$triple" >/dev/null 2>&1 || true
@@ -28,7 +29,7 @@ build_target() {
 skipping $triple: no suitable Linux-musl cross toolchain found.
 Install one of:
   cargo install cargo-zigbuild && brew install zig
-  cargo install cross
+  cargo install cross     # Linux hosts only
   $cc
 EOF
         return 0

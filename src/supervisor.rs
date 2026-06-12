@@ -31,6 +31,9 @@ use crate::{client, netwatch, transport};
 
 /// Per-attempt QUIC handshake timeout during recovery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default remote UDP range, matching mosh's operational firewall convention.
+const DEFAULT_UDP_PORT_START: u16 = 60000;
+const DEFAULT_UDP_PORT_END: u16 = 61000;
 /// Tier-2 attempts per cycle before escalating to a tier-3 re-bootstrap.
 const REATTACH_ATTEMPTS_PER_CYCLE: u32 = 6;
 /// Backoff parameters (full jitter, capped).
@@ -58,12 +61,12 @@ pub struct Supervisor {
 impl Supervisor {
     /// Bootstrap `host` and start supervising. Returns once the first
     /// connection is up (so callers can bind forwards immediately).
-    pub async fn start(host: String, listen: String) -> Result<Self> {
+    pub async fn start(host: String, listen: Option<String>) -> Result<Self> {
         let timing = Timing::default();
 
         let (status_tx, status_rx) = watch::channel(Status::Bootstrapping);
         info!(%host, "bootstrapping agent over SSH");
-        let session = bootstrap::bootstrap(&host, &listen).await?;
+        let session = bootstrap_agent(&host, listen.as_deref()).await?;
         let addr = resolve(&session.quic_target).await?;
 
         // One endpoint for the whole session lifetime; per-connect configs
@@ -71,7 +74,15 @@ impl Supervisor {
         let client_cfg = crypto::client_config(&session.client_id, session.agent_fp, &timing)?;
         let endpoint = transport::client_endpoint_bare()?;
 
-        let conn = connect_once(&endpoint, client_cfg.clone(), addr).await?;
+        let conn = connect_once(&endpoint, client_cfg.clone(), addr)
+            .await
+            .with_context(|| {
+                format!(
+                    "connecting to agent UDP listener at {} ({addr}); open/forward this UDP port \
+                     on the remote, or choose an allowed port with --remote-udp 0.0.0.0:<PORT>",
+                    session.quic_target
+                )
+            })?;
         info!(target = %session.quic_target, "connected to agent");
         status_tx.send_replace(Status::Connected);
 
@@ -116,7 +127,7 @@ impl Supervisor {
 
 struct MonitorCtx {
     host: String,
-    listen: String,
+    listen: Option<String>,
     endpoint: Endpoint,
     timing: Timing,
     session: AgentSession,
@@ -200,7 +211,7 @@ async fn monitor_loop(mut ctx: MonitorCtx) {
             if attempt.is_multiple_of(REATTACH_ATTEMPTS_PER_CYCLE) {
                 ctx.status_tx.send_replace(Status::Bootstrapping);
                 info!("re-bootstrapping agent over SSH");
-                match bootstrap::bootstrap(&ctx.host, &ctx.listen).await {
+                match bootstrap_agent(&ctx.host, ctx.listen.as_deref()).await {
                     Ok(session) => match resolve(&session.quic_target).await {
                         Ok(addr) => {
                             match crypto::client_config(
@@ -246,6 +257,27 @@ async fn monitor_loop(mut ctx: MonitorCtx) {
         ctx.status_tx.send_replace(Status::Connected);
         info!("session restored");
     }
+}
+
+async fn bootstrap_agent(host: &str, listen: Option<&str>) -> Result<AgentSession> {
+    if let Some(listen) = listen {
+        return bootstrap::bootstrap(host, listen).await;
+    }
+
+    let mut last_err = None;
+    for port in DEFAULT_UDP_PORT_START..=DEFAULT_UDP_PORT_END {
+        let listen = format!("0.0.0.0:{port}");
+        match bootstrap::bootstrap(host, &listen).await {
+            Ok(session) => return Ok(session),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("no ports in default UDP range"))
+        .context(format!(
+            "could not start remote agent on any UDP port in {DEFAULT_UDP_PORT_START}-{DEFAULT_UDP_PORT_END}"
+        )))
 }
 
 /// One bounded QUIC connect attempt with an explicit (per-session) config.

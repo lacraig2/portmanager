@@ -41,6 +41,11 @@ pub struct RunArgs {
     /// Start the local forwarding client in the background.
     #[arg(long)]
     pub daemon: bool,
+
+    /// UDP address the remote agent should bind. Defaults to the mosh-style
+    /// 60000-61000 range; use this to force one specific allowed port.
+    #[arg(long)]
+    pub remote_udp: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
