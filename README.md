@@ -113,9 +113,11 @@ $ cargo build --release            # client (and same-arch agent)
 $ scripts/build-agents.sh          # static musl agents (x86_64 + aarch64)
 ```
 
-Per-target agent binaries land in `~/.cache/portmanager/dist/` and are picked
-up automatically when the remote arch differs from yours
-(`PORTMANAGER_AGENT_BIN` overrides).
+Release packages include the client for one platform plus Linux agents under
+`agents/`, so a Windows or macOS client can still deploy to Linux remotes. The
+client looks for `agents/agent-<triple>` next to itself, then
+`~/.cache/portmanager/dist/agent-<triple>`. `PORTMANAGER_AGENT_BIN` overrides
+both for manual testing.
 
 ## Test
 

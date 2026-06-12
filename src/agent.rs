@@ -109,6 +109,7 @@ fn read_hello_stdin() -> Result<Hello> {
 
 /// Fork + setsid + detach stdio, so the process survives the SSH session.
 /// stderr is redirected to a log file under `~/.cache/portmanager/`.
+#[cfg(unix)]
 fn daemonize() -> Result<()> {
     use nix::unistd::{ForkResult, fork, setsid};
 
@@ -143,6 +144,11 @@ fn daemonize() -> Result<()> {
     nix::unistd::dup2_stdout(&devnull).context("detaching stdout")?;
     nix::unistd::dup2_stderr(&log).context("redirecting stderr to log")?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn daemonize() -> Result<()> {
+    anyhow::bail!("agent daemonization is only supported on Unix-like remote hosts")
 }
 
 /// Accept connections, tracking how many are live; exit when the grace window

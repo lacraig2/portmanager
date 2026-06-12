@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -54,6 +56,7 @@ pub struct ForwardEntry {
 }
 
 /// Control socket path for `host`.
+#[cfg(unix)]
 pub fn socket_path(host: &str) -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -77,6 +80,25 @@ pub fn socket_path(host: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{safe}.sock")))
 }
 
+/// Placeholder path for platforms where the Unix-socket control API is not
+/// implemented yet.
+#[cfg(not(unix))]
+pub fn socket_path(host: &str) -> Result<PathBuf> {
+    let safe: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(std::env::temp_dir()
+        .join("portmanager")
+        .join(format!("{safe}.sock")))
+}
+
 /// Everything a control request can touch.
 pub struct ControlCtx {
     pub host: String,
@@ -90,6 +112,7 @@ pub struct ControlCtx {
 
 /// Serve the control socket until the task is aborted. Stale sockets from a
 /// dead session are replaced.
+#[cfg(unix)]
 pub async fn serve(ctx: ControlCtx) -> Result<()> {
     let path = socket_path(&ctx.host)?;
     if path.exists() {
@@ -119,6 +142,18 @@ pub async fn serve(ctx: ControlCtx) -> Result<()> {
     }
 }
 
+/// Windows support currently builds and runs foreground forwarding, but live
+/// control needs a named-pipe transport instead of Unix sockets.
+#[cfg(not(unix))]
+pub async fn serve(ctx: ControlCtx) -> Result<()> {
+    warn!(
+        host = %ctx.host,
+        "control socket unavailable on this platform; add/drop/list/status/stop are disabled"
+    );
+    std::future::pending::<Result<()>>().await
+}
+
+#[cfg(unix)]
 async fn handle(stream: UnixStream, ctx: &ControlCtx) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -144,6 +179,7 @@ async fn handle(stream: UnixStream, ctx: &ControlCtx) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn dispatch(req: Request, ctx: &ControlCtx) -> (Response, bool) {
     match req {
         Request::Add { spec } => match add_forward(&spec, ctx).await {
@@ -278,6 +314,7 @@ pub fn display_spec(spec: &ForwardSpec) -> String {
 }
 
 /// Client side: send one request to the session for `host`.
+#[cfg(unix)]
 pub async fn request(host: &str, req: &Request) -> Result<Response> {
     let path = socket_path(host)?;
     let stream = UnixStream::connect(&path).await.with_context(|| {
@@ -300,12 +337,23 @@ pub async fn request(host: &str, req: &Request) -> Result<Response> {
     serde_json::from_str(&resp).context("parsing control response")
 }
 
+/// Client side: control requests are not implemented without Unix sockets.
+#[cfg(not(unix))]
+pub async fn request(host: &str, _req: &Request) -> Result<Response> {
+    bail!("control commands are not supported on this platform for host {host:?}")
+}
+
 /// Best-effort cleanup of the socket on session end.
+#[cfg(unix)]
 pub fn cleanup(host: &str) {
     if let Ok(path) = socket_path(host) {
         let _ = std::fs::remove_file(path);
     }
 }
+
+/// Best-effort cleanup of the socket on session end.
+#[cfg(not(unix))]
+pub fn cleanup(_host: &str) {}
 
 #[cfg(test)]
 mod tests {

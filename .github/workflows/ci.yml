@@ -36,18 +36,33 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
+            bin: portmanager
+            ext: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
+            bin: portmanager
+            ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+            bin: portmanager
+            ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             use_cross: false
+            bin: portmanager
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
+            bin: portmanager
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            bin: portmanager.exe
+            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -68,14 +83,15 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
       - name: Rename artifact
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/portmanager \
-             dist/portmanager-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/${{ matrix.bin }} \
+             dist/portmanager-${{ matrix.target }}${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: portmanager-${{ matrix.target }}
-          path: dist/portmanager-${{ matrix.target }}
+          path: dist/portmanager-${{ matrix.target }}${{ matrix.ext }}
 
   release:
     name: Release
@@ -98,8 +114,47 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Package clients with Linux agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packages
+
+          make_package() {
+            local target="$1"
+            local src="$2"
+            local client_name="$3"
+            local format="$4"
+            local root="$RUNNER_TEMP/pkg-$target"
+            local pkg="$root/portmanager-$target"
+            rm -rf "$root"
+            mkdir -p "$pkg/agents"
+            cp "dist/$src" "$pkg/$client_name"
+
+            for agent in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              cp "dist/portmanager-$agent" "$pkg/agents/agent-$agent"
+              chmod 0755 "$pkg/agents/agent-$agent"
+            done
+
+            if [[ "$client_name" != *.exe ]]; then
+              chmod 0755 "$pkg/$client_name"
+            fi
+
+            if [[ "$format" == "zip" ]]; then
+              (cd "$root" && zip -qr "$GITHUB_WORKSPACE/packages/portmanager-$target.zip" "portmanager-$target")
+            else
+              tar -C "$root" -czf "packages/portmanager-$target.tar.gz" "portmanager-$target"
+            fi
+          }
+
+          make_package x86_64-unknown-linux-musl portmanager-x86_64-unknown-linux-musl portmanager tar
+          make_package aarch64-unknown-linux-musl portmanager-aarch64-unknown-linux-musl portmanager tar
+          make_package x86_64-unknown-linux-gnu portmanager-x86_64-unknown-linux-gnu portmanager tar
+          make_package x86_64-apple-darwin portmanager-x86_64-apple-darwin portmanager tar
+          make_package aarch64-apple-darwin portmanager-aarch64-apple-darwin portmanager tar
+          make_package x86_64-pc-windows-msvc portmanager-x86_64-pc-windows-msvc.exe portmanager.exe zip
       - name: Checksums
-        run: cd dist && sha256sum portmanager-* > SHA256SUMS
+        run: sha256sum dist/portmanager-* packages/* > dist/SHA256SUMS
       - name: Create release
         id: create_release
         uses: softprops/action-gh-release@v2.3.3
@@ -109,5 +164,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             dist/portmanager-*
+            packages/*
             dist/SHA256SUMS
           generate_release_notes: true

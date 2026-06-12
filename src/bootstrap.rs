@@ -64,10 +64,12 @@ fn local_arch_token() -> &'static str {
 
 /// Locate the agent binary to deploy for `triple`, in preference order:
 /// 1. `$PORTMANAGER_AGENT_BIN` (explicit override),
-/// 2. the dist cache (`~/.cache/portmanager/dist/agent-<triple>`, populated by
+/// 2. `agents/agent-<triple>` next to this executable (release packages),
+/// 3. `agent-<triple>` next to this executable,
+/// 4. the dist cache (`~/.cache/portmanager/dist/agent-<triple>`, populated by
 ///    `scripts/build-agents.sh`),
-/// 3. this workspace's own `target/<triple>/release/portmanager` (dev builds),
-/// 4. our own binary, if the remote arch matches the local one.
+/// 5. this workspace's own `target/<triple>/release/portmanager` (dev builds),
+/// 6. our own binary, if the remote arch matches the local one.
 fn agent_binary_for(triple: &str, remote_arch: &str) -> Result<std::path::PathBuf> {
     if let Ok(p) = std::env::var("PORTMANAGER_AGENT_BIN") {
         let p = std::path::PathBuf::from(p);
@@ -75,6 +77,18 @@ fn agent_binary_for(triple: &str, remote_arch: &str) -> Result<std::path::PathBu
             return Ok(p);
         }
         bail!("PORTMANAGER_AGENT_BIN={} does not exist", p.display());
+    }
+
+    let exe = std::env::current_exe().context("locating own binary")?;
+    if let Some(exe_dir) = exe.parent() {
+        for packaged in [
+            exe_dir.join("agents").join(format!("agent-{triple}")),
+            exe_dir.join(format!("agent-{triple}")),
+        ] {
+            if packaged.is_file() {
+                return Ok(packaged);
+            }
+        }
     }
 
     if let Some(base) = directories::BaseDirs::new() {
@@ -87,7 +101,6 @@ fn agent_binary_for(triple: &str, remote_arch: &str) -> Result<std::path::PathBu
         }
     }
 
-    let exe = std::env::current_exe().context("locating own binary")?;
     if let Some(target_dir) = exe
         .ancestors()
         .find(|p| p.file_name().is_some_and(|n| n == "target"))

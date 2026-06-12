@@ -255,6 +255,7 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn spawn_daemon(verbose: u8) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -306,6 +307,59 @@ fn spawn_daemon(verbose: u8) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_daemon(verbose: u8) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let log_dir = directories::BaseDirs::new()
+        .map(|d| d.cache_dir().join("portmanager"))
+        .unwrap_or_else(|| std::env::temp_dir().join("portmanager"));
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("creating log directory {}", log_dir.display()))?;
+    let log_path = log_dir.join("client.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("NUL")
+        .context("opening NUL")?;
+
+    let child = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env(DAEMON_CHILD_ENV, "1")
+        .stdin(Stdio::from(
+            devnull.try_clone().context("cloning NUL handle")?,
+        ))
+        .stdout(Stdio::from(devnull))
+        .stderr(Stdio::from(log))
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .context("spawning daemon client")?;
+
+    if verbose > 0 {
+        eprintln!(
+            "started portmanager daemon pid={} log={}",
+            child.id(),
+            log_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_daemon(_verbose: u8) -> Result<()> {
+    bail!("daemon mode is not supported on this platform")
 }
 
 /// Parse a list of forward-spec strings, surfacing the offending spec on error.
