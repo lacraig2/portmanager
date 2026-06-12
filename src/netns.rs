@@ -72,6 +72,20 @@ fn helper_exe() -> Result<PathBuf> {
     std::env::current_exe().context("locating own binary")
 }
 
+/// Resolve a namespace selector to the PID whose `/proc/<pid>/net/tcp` shows
+/// that namespace's listeners (`None` = the agent's own/host namespace).
+/// Used by discovery; nspath/netns forms carry no PID and can't be scanned.
+pub fn resolve_pid(ns: &NsSpec) -> Result<Option<i32>> {
+    match ns {
+        NsSpec::Host => Ok(None),
+        NsSpec::Pid(pid) => Ok(Some(*pid)),
+        NsSpec::Podman(name) => Ok(Some(inspect_pid("podman", name)?)),
+        NsSpec::Docker(name) => Ok(Some(inspect_pid("docker", name)?)),
+        NsSpec::NsPath(p) => bail!("cannot scan nspath:{} (no owning PID)", p.display()),
+        NsSpec::Netns(name) => bail!("cannot scan netns:{name} (rootful; unsupported in v1)"),
+    }
+}
+
 /// `<runtime> inspect --format {{.State.Pid}} <name>` -> PID.
 fn inspect_pid(runtime: &str, name: &str) -> Result<i32> {
     let out = Command::new(runtime)

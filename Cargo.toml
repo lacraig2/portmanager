@@ -16,6 +16,7 @@ quinn = { version = "0.11.9", default-features = false, features = ["runtime-tok
 rcgen = "0.14.7"
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 sha2 = "0.11.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }

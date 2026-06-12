@@ -261,6 +261,11 @@ async fn handle_stream(
         .await
         .context("reading stream header")?;
 
+    // Dedicated discovery stream (port scanner push channel).
+    if header.host == crate::discovery::DISCOVERY_HOST {
+        return crate::discovery::serve(send, recv).await;
+    }
+
     let target = format!("{}:{}", header.host, header.port);
     let tcp = if header.ns.is_empty() {
         debug!(%target, "dialing target");

@@ -3,6 +3,7 @@
 //! `main` is sync on purpose: the agent role daemonizes (forks) after its
 //! stdio handshake, which must happen before any tokio runtime exists.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -11,9 +12,11 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use portmanager::cli::{self, Cli, Command};
+use portmanager::client::ForwardSet;
+use portmanager::control::{self, Request, Response};
 use portmanager::forward::ForwardSpec;
 use portmanager::supervisor::{Status, Supervisor};
-use portmanager::{agent, client, crypto, netns};
+use portmanager::{agent, config, crypto, discovery, netns};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -27,35 +30,101 @@ fn main() -> Result<()> {
             args.foreground,
         ),
         Some(Command::NsHelper) => netns::run_helper(),
-        Some(Command::Add { .. })
-        | Some(Command::Drop { .. })
-        | Some(Command::List { .. })
-        | Some(Command::Status { .. }) => {
-            bail!("control-socket subcommands not yet implemented");
+        Some(cmd) => block_on(run_control_command(cmd)),
+        None => block_on(run_client(cli.run)),
+    }
+}
+
+fn block_on<F: std::future::Future<Output = Result<()>>>(fut: F) -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?
+        .block_on(fut)
+}
+
+/// `add`/`drop`/`list`/`status`: talk to the running session's control socket.
+async fn run_control_command(cmd: Command) -> Result<()> {
+    let (host, requests) = match cmd {
+        Command::Add { host, specs } => {
+            if specs.is_empty() {
+                bail!("add: pass at least one forward spec");
+            }
+            // Validate locally before bothering the session.
+            for s in &specs {
+                s.parse::<ForwardSpec>()
+                    .map_err(|e| anyhow::anyhow!("invalid forward spec {s:?}: {e}"))?;
+            }
+            (host, specs.into_iter().map(|spec| Request::Add { spec }).collect::<Vec<_>>())
         }
-        None => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .context("building tokio runtime")?;
-            runtime.block_on(run_client(cli.run))
+        Command::Drop { host, specs } => {
+            if specs.is_empty() {
+                bail!("drop: pass at least one forward spec or local port");
+            }
+            (host, specs.into_iter().map(|spec| Request::Drop { spec }).collect())
         }
+        Command::List { host } => (host, vec![Request::List]),
+        Command::Status { host } => (host, vec![Request::Status]),
+        Command::Agent(_) | Command::NsHelper => unreachable!("handled in main"),
+    };
+
+    let mut failed = false;
+    for req in &requests {
+        match control::request(&host, req).await? {
+            Response::Ok { message } => println!("{message}"),
+            Response::Forwards { entries } => print_entries(&entries),
+            Response::StatusIs { state, entries } => {
+                println!("session: {state}");
+                print_entries(&entries);
+            }
+            Response::Error { message } => {
+                eprintln!("error: {message}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        bail!("one or more control requests failed");
+    }
+    Ok(())
+}
+
+fn print_entries(entries: &[control::ForwardEntry]) {
+    if entries.is_empty() {
+        println!("(no forwards)");
+        return;
+    }
+    for e in entries {
+        println!("{:<24} {}", e.local, e.spec);
     }
 }
 
 /// Default action: bootstrap an agent on the host and serve the forward set
-/// under the never-give-up supervisor.
+/// under the never-give-up supervisor, with control socket + discovery.
 async fn run_client(args: cli::RunArgs) -> Result<()> {
     let host = args
         .host
         .context("no host given; usage: portmanager <host> <spec>...")?;
 
-    let forwards = parse_specs(&args.specs)?;
-    if forwards.is_empty() {
-        bail!("no forwards given; pass at least one spec (e.g. 8888 or 192.168.4.2:8080->8080)");
+    // Start from CLI specs merged with the host's remembered state.
+    let state = {
+        let host = host.clone();
+        tokio::task::spawn_blocking(move || config::load_state(&host)).await??
+    };
+    let mut forwards = parse_specs(&args.specs)?;
+    for remembered in state.parsed_forwards() {
+        if !forwards.iter().any(|f| f.local_port == remembered.local_port) {
+            forwards.push(remembered);
+        }
+    }
+    if forwards.is_empty() && state.autoforward.is_empty() {
+        bail!(
+            "no forwards given and none remembered for {host:?}; pass at least one spec \
+             (e.g. 8888 or 192.168.4.2:8080->8080)"
+        );
     }
 
-    let supervisor = Supervisor::start(host, "0.0.0.0:0".to_string())
+    let supervisor = Supervisor::start(host.clone(), "0.0.0.0:0".to_string())
         .await
         .map_err(|e| {
             e.context(
@@ -64,11 +133,28 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
             )
         })?;
 
+    let forward_set = Arc::new(ForwardSet::new(supervisor.slot.clone()));
     for forward in forwards {
-        client::bind_forward(supervisor.slot.clone(), forward)
+        forward_set
+            .add(forward)
             .await
             .context("binding forward")?;
     }
+
+    // Control socket: live add/drop/list/status.
+    let control_task = tokio::spawn(control::serve(control::ControlCtx {
+        host: host.clone(),
+        forwards: forward_set.clone(),
+        status: supervisor.status.clone(),
+    }));
+
+    // Discovery: auto-forward rule matching (no-op without rules).
+    tokio::spawn(discovery::watch(
+        host.clone(),
+        supervisor.slot.clone(),
+        forward_set.clone(),
+        state.autoforward.clone(),
+    ));
 
     // Mosh-style status: announce transitions until Ctrl-C.
     let mut status = supervisor.status.clone();
@@ -77,11 +163,14 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down");
+                control_task.abort();
+                control::cleanup(&host);
                 supervisor.shutdown().await;
                 return Ok(());
             }
             changed = status.changed() => {
                 if changed.is_err() {
+                    control::cleanup(&host);
                     bail!("supervisor exited unexpectedly");
                 }
                 match &*status.borrow_and_update() {

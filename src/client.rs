@@ -8,13 +8,14 @@
 //! connection is live, waiting up to a short deadline during outages before
 //! giving up (accept-then-RST policy).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use quinn::Connection;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -59,6 +60,78 @@ pub async fn bind_forward(
     );
     let handle = tokio::spawn(accept_loop(listener, slot, forward));
     Ok((local, handle))
+}
+
+/// One live forward: its spec, where it actually bound, and its accept task.
+#[derive(Debug)]
+pub struct ActiveForward {
+    pub spec: ForwardSpec,
+    pub local: SocketAddr,
+    task: JoinHandle<()>,
+}
+
+/// The dynamic-forward core: the runtime-managed collection behind launch
+/// args, the control socket, and auto-detect. All mutation funnels through
+/// here so every source shares one bind/unbind path.
+pub struct ForwardSet {
+    slot: ConnSlot,
+    active: Mutex<HashMap<u16, ActiveForward>>,
+}
+
+impl ForwardSet {
+    pub fn new(slot: ConnSlot) -> Self {
+        ForwardSet {
+            slot,
+            active: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Bind and start a forward. Returns the actual local address (resolves
+    /// port 0). Fails if the local port is already in the set.
+    pub async fn add(&self, spec: ForwardSpec) -> Result<SocketAddr> {
+        let mut active = self.active.lock().await;
+        if spec.local_port != 0 && active.contains_key(&spec.local_port) {
+            bail!("local port {} is already forwarded", spec.local_port);
+        }
+        let (local, task) = bind_forward(self.slot.clone(), spec.clone()).await?;
+        active.insert(
+            local.port(),
+            ActiveForward { spec, local, task },
+        );
+        Ok(local)
+    }
+
+    /// Stop a forward by local port: abort its accept loop (closing the
+    /// listener) — active spliced connections drain on their own.
+    pub async fn remove(&self, local_port: u16) -> Result<ForwardSpec> {
+        let mut active = self.active.lock().await;
+        let fwd = active
+            .remove(&local_port)
+            .with_context(|| format!("no forward on local port {local_port}"))?;
+        fwd.task.abort();
+        info!(local = %fwd.local, "forward dropped");
+        Ok(fwd.spec)
+    }
+
+    /// Snapshot of (spec, actual local addr) pairs, ordered by local port.
+    pub async fn list(&self) -> Vec<(ForwardSpec, SocketAddr)> {
+        let active = self.active.lock().await;
+        let mut out: Vec<_> = active
+            .values()
+            .map(|f| (f.spec.clone(), f.local))
+            .collect();
+        out.sort_by_key(|(_, l)| l.port());
+        out
+    }
+
+    /// Whether some forward already targets `ns`+`remote_port` (dedup for
+    /// auto-detect).
+    pub async fn targets(&self, ns_wire: &str, remote_port: u16) -> bool {
+        let active = self.active.lock().await;
+        active
+            .values()
+            .any(|f| f.spec.ns.to_wire() == ns_wire && f.spec.remote_port == remote_port)
+    }
 }
 
 /// Accept local connections forever, fanning each onto its own QUIC stream.
