@@ -16,8 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::watch;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, info, warn};
 
 use crate::client::{ConnSlot, ForwardSet};
@@ -137,7 +136,11 @@ pub async fn watch(
     let watch_list: String = {
         let mut set = BTreeSet::new();
         for r in &rules {
-            set.insert(if r.ns.is_empty() { "host".to_string() } else { r.ns.clone() });
+            set.insert(if r.ns.is_empty() {
+                "host".to_string()
+            } else {
+                r.ns.clone()
+            });
         }
         set.into_iter().collect::<Vec<_>>().join(" ")
     };
@@ -231,10 +234,14 @@ async fn consider(
         let host = host.to_string();
         tokio::task::spawn_blocking(move || config::load_state(&host)).await??
     };
-    let preferred = state.assignments.get(&key).copied().or(match rule.local.as_str() {
-        "same" => Some(l.port),
-        _ => None,
-    });
+    let preferred = state
+        .assignments
+        .get(&key)
+        .copied()
+        .or(match rule.local.as_str() {
+            "same" => Some(l.port),
+            _ => None,
+        });
 
     let ns = NsSpec::from_wire(&l.ns).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut spec = ForwardSpec {

@@ -173,7 +173,10 @@ async fn read_nonempty_line<R: AsyncBufReadExt + Unpin>(
 ) -> Result<String> {
     loop {
         let mut line = String::new();
-        let n = r.read_line(&mut line).await.context("reading handshake line")?;
+        let n = r
+            .read_line(&mut line)
+            .await
+            .context("reading handshake line")?;
         if n == 0 {
             bail!("connection closed before {expected_tag}");
         }
@@ -191,7 +194,11 @@ fn check_tagged_line(line: &str, expected_tag: &str) -> Result<Vec<String>> {
     let parts: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     match parts.first().map(String::as_str) {
         Some(t) if t == ERROR_TAG => {
-            let msg = line.strip_prefix(ERROR_TAG).unwrap_or(line).trim().to_string();
+            let msg = line
+                .strip_prefix(ERROR_TAG)
+                .unwrap_or(line)
+                .trim()
+                .to_string();
             bail!("agent reported: {msg}");
         }
         Some(t) if t == expected_tag => {}

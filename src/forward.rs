@@ -51,9 +51,9 @@ pub enum NsSpec {
 impl NsSpec {
     /// Parse the portion before `@` into a namespace selector.
     fn parse(s: &str) -> Result<Self, SpecError> {
-        let (kind, rest) = s
-            .split_once(':')
-            .ok_or_else(|| SpecError::BadNamespace(s.to_string(), "expected <kind>:<value>".into()))?;
+        let (kind, rest) = s.split_once(':').ok_or_else(|| {
+            SpecError::BadNamespace(s.to_string(), "expected <kind>:<value>".into())
+        })?;
         if rest.is_empty() {
             return Err(SpecError::BadNamespace(s.to_string(), "empty value".into()));
         }
@@ -180,9 +180,9 @@ fn parse_host_port(s: &str, raw: &str) -> Result<(String, u16), SpecError> {
 
     // Bracketed IPv6: [addr]:port
     if let Some(after) = s.strip_prefix('[') {
-        let (host, rest) = after
-            .split_once(']')
-            .ok_or_else(|| SpecError::Malformed(raw.to_string(), "unterminated '[' in host".into()))?;
+        let (host, rest) = after.split_once(']').ok_or_else(|| {
+            SpecError::Malformed(raw.to_string(), "unterminated '[' in host".into())
+        })?;
         let port = rest
             .strip_prefix(':')
             .ok_or_else(|| SpecError::MissingPort(raw.to_string()))?;
@@ -215,7 +215,10 @@ fn parse_port(s: &str, raw: &str) -> Result<u16, SpecError> {
         .map_err(|e| SpecError::InvalidPort(s.to_string(), e.to_string()))
         .and_then(|p| {
             if p == 0 {
-                Err(SpecError::InvalidPort(s.to_string(), "port must be non-zero".into()))
+                Err(SpecError::InvalidPort(
+                    s.to_string(),
+                    "port must be non-zero".into(),
+                ))
             } else {
                 Ok(p)
             }

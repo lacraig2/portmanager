@@ -66,6 +66,7 @@ async fn control_socket_add_drop_list_status() {
         host: host.clone(),
         forwards: forwards.clone(),
         status: status_rx,
+        persist: portmanager::config::PersistTarget::HostState { host: host.clone() },
     };
     let server = tokio::spawn(control::serve(ctx));
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -81,7 +82,9 @@ async fn control_socket_add_drop_list_status() {
     assert!(matches!(resp, Response::Ok { .. }), "add failed: {resp:?}");
 
     // the added forward actually moves bytes
-    let mut sock = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+    let mut sock = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
     sock.write_all(b"dynamic!").await.unwrap();
     let mut buf = [0u8; 8];
     sock.read_exact(&mut buf).await.unwrap();
@@ -113,13 +116,20 @@ async fn control_socket_add_drop_list_status() {
     assert_eq!(state.forwards, vec![spec.clone()]);
 
     // drop by local port; listener must actually close
-    let resp = control::request(&host, &Request::Drop { spec: port.to_string() })
-        .await
-        .unwrap();
+    let resp = control::request(
+        &host,
+        &Request::Drop {
+            spec: port.to_string(),
+        },
+    )
+    .await
+    .unwrap();
     assert!(matches!(resp, Response::Ok { .. }), "drop failed: {resp:?}");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await.is_err(),
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err(),
         "listener should be closed after drop"
     );
 

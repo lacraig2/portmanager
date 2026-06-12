@@ -155,7 +155,8 @@ async fn monitor_loop(mut ctx: MonitorCtx) {
             Some(reason) => warn!(%reason, "connection lost; recovering"),
             None => {
                 info!("closing session");
-                ctx.conn.close(VarInt::from_u32(CLOSE_SHUTDOWN), b"shutdown");
+                ctx.conn
+                    .close(VarInt::from_u32(CLOSE_SHUTDOWN), b"shutdown");
                 ctx.endpoint.wait_idle().await;
                 return;
             }

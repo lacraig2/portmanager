@@ -51,7 +51,9 @@ pub async fn bind_forward(
                 forward.local_addr, forward.local_port
             )
         })?;
-    let local = listener.local_addr().context("reading local listener addr")?;
+    let local = listener
+        .local_addr()
+        .context("reading local listener addr")?;
     info!(
         %local,
         target = %format!("{}:{}", forward.remote_host, forward.remote_port),
@@ -94,10 +96,7 @@ impl ForwardSet {
             bail!("local port {} is already forwarded", spec.local_port);
         }
         let (local, task) = bind_forward(self.slot.clone(), spec.clone()).await?;
-        active.insert(
-            local.port(),
-            ActiveForward { spec, local, task },
-        );
+        active.insert(local.port(), ActiveForward { spec, local, task });
         Ok(local)
     }
 
@@ -116,10 +115,7 @@ impl ForwardSet {
     /// Snapshot of (spec, actual local addr) pairs, ordered by local port.
     pub async fn list(&self) -> Vec<(ForwardSpec, SocketAddr)> {
         let active = self.active.lock().await;
-        let mut out: Vec<_> = active
-            .values()
-            .map(|f| (f.spec.clone(), f.local))
-            .collect();
+        let mut out: Vec<_> = active.values().map(|f| (f.spec.clone(), f.local)).collect();
         out.sort_by_key(|(_, l)| l.port());
         out
     }
@@ -187,7 +183,10 @@ async fn serve_one(mut slot: ConnSlot, forward: ForwardSpec, tcp: TcpStream) -> 
         // loop back and wait for the supervisor to install a fresh one.
         match conn.open_bi().await {
             Ok((mut send, recv)) => {
-                header.write(&mut send).await.context("writing stream header")?;
+                header
+                    .write(&mut send)
+                    .await
+                    .context("writing stream header")?;
                 return proto::splice(tcp, send, recv).await.context("splicing");
             }
             Err(e) => {

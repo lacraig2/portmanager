@@ -53,13 +53,60 @@ pub fn target_triple(uname_sm: &str) -> Result<&'static str> {
     }
 }
 
-/// Local arch as a `uname -m`-style token, for the same-arch v1 guard.
+/// Local arch as a `uname -m`-style token.
 fn local_arch_token() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "x86_64",
         "aarch64" => "aarch64",
         other => other,
     }
+}
+
+/// Locate the agent binary to deploy for `triple`, in preference order:
+/// 1. `$PORTMANAGER_AGENT_BIN` (explicit override),
+/// 2. the dist cache (`~/.cache/portmanager/dist/agent-<triple>`, populated by
+///    `scripts/build-agents.sh`),
+/// 3. this workspace's own `target/<triple>/release/portmanager` (dev builds),
+/// 4. our own binary, if the remote arch matches the local one.
+fn agent_binary_for(triple: &str, remote_arch: &str) -> Result<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("PORTMANAGER_AGENT_BIN") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!("PORTMANAGER_AGENT_BIN={} does not exist", p.display());
+    }
+
+    if let Some(base) = directories::BaseDirs::new() {
+        let dist = base
+            .cache_dir()
+            .join("portmanager/dist")
+            .join(format!("agent-{triple}"));
+        if dist.is_file() {
+            return Ok(dist);
+        }
+    }
+
+    let exe = std::env::current_exe().context("locating own binary")?;
+    if let Some(target_dir) = exe
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "target"))
+    {
+        let dev = target_dir.join(triple).join("release/portmanager");
+        if dev.is_file() {
+            return Ok(dev);
+        }
+    }
+
+    if remote_arch == local_arch_token() {
+        return Ok(exe);
+    }
+
+    bail!(
+        "no agent binary for {triple} (remote arch {remote_arch}, local {}). \
+         Build one with scripts/build-agents.sh or set PORTMANAGER_AGENT_BIN.",
+        local_arch_token()
+    )
 }
 
 /// Bootstrap an agent on `host` listening on `listen` (a UDP bind spec).
@@ -70,18 +117,9 @@ pub async fn bootstrap(host: &str, listen: &str) -> Result<AgentSession> {
         .await
         .context("detecting remote OS/arch")?;
     let triple = target_triple(uname.trim())?;
-
-    // v1: deploy our own binary, so the remote arch must match the local arch.
     let remote_arch = uname.split_whitespace().nth(1).unwrap_or_default();
-    if remote_arch != local_arch_token() {
-        bail!(
-            "remote arch {remote_arch:?} differs from local {:?}; cross-arch agent \
-             deploy lands with the musl build pipeline (build step 8)",
-            local_arch_token()
-        );
-    }
 
-    let exe = std::env::current_exe().context("locating own binary for deploy")?;
+    let exe = agent_binary_for(triple, remote_arch)?;
     let remote_path = deploy_agent(host, &exe, triple).await?;
 
     let client_id = Identity::generate()?;

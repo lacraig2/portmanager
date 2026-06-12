@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::client::ForwardSet;
-use crate::config::{self, HostState};
+use crate::config::PersistTarget;
 use crate::forward::ForwardSpec;
 use crate::supervisor::Status;
 
@@ -31,10 +31,19 @@ pub enum Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Ok { message: String },
-    Forwards { entries: Vec<ForwardEntry> },
-    StatusIs { state: String, entries: Vec<ForwardEntry> },
-    Error { message: String },
+    Ok {
+        message: String,
+    },
+    Forwards {
+        entries: Vec<ForwardEntry>,
+    },
+    StatusIs {
+        state: String,
+        entries: Vec<ForwardEntry>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,7 +65,13 @@ pub fn socket_path(host: &str) -> Result<PathBuf> {
     std::fs::set_permissions(&dir, perms).context("restricting control dir")?;
     let safe: String = host
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     Ok(dir.join(format!("{safe}.sock")))
 }
@@ -66,6 +81,8 @@ pub struct ControlCtx {
     pub host: String,
     pub forwards: Arc<ForwardSet>,
     pub status: watch::Receiver<Status>,
+    /// Where live changes are written back (host state or named profile).
+    pub persist: PersistTarget,
 }
 
 /// Serve the control socket until the task is aborted. Stale sockets from a
@@ -182,8 +199,8 @@ async fn drop_forward(spec: &str, ctx: &ControlCtx) -> Result<String> {
     Ok(format!("dropped {}", display_spec(&dropped)))
 }
 
-/// Write the live forward set back to the host's state file, preserving
-/// assignments and rules.
+/// Write the live forward set back to the persistence target (host state file
+/// or named profile), preserving assignments and rules.
 async fn persist(ctx: &ControlCtx) {
     let specs: Vec<String> = ctx
         .forwards
@@ -192,24 +209,23 @@ async fn persist(ctx: &ControlCtx) {
         .into_iter()
         .map(|(spec, _)| display_spec(&spec))
         .collect();
-    let host = ctx.host.clone();
-    let res = tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut state = config::load_state(&host)?;
-        state.forwards = specs;
-        config::save_state(&host, &state)
-    })
-    .await;
+    let target = ctx.persist.clone();
+    let res = tokio::task::spawn_blocking(move || target.save_forwards(specs)).await;
     match res {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!(error = %e, "state persistence failed"),
-        Err(e) => warn!(error = %e, "state persistence task panicked"),
+        Ok(Err(e)) => warn!(error = %e, "persistence failed"),
+        Err(e) => warn!(error = %e, "persistence task panicked"),
     }
 }
 
 /// Canonical CLI-grammar rendering of a spec (parseable back).
 pub fn display_spec(spec: &ForwardSpec) -> String {
     let ns = spec.ns.to_wire();
-    let prefix = if ns.is_empty() { String::new() } else { format!("{ns}@") };
+    let prefix = if ns.is_empty() {
+        String::new()
+    } else {
+        format!("{ns}@")
+    };
     format!(
         "{prefix}{}:{}->{}",
         spec.remote_host, spec.remote_port, spec.local_port
@@ -277,11 +293,18 @@ mod tests {
 
     #[test]
     fn display_spec_roundtrips_through_parser() {
-        for raw in ["8888", "192.168.4.2:8080->8080", "podman:web@10.88.0.5:5432->15432"] {
+        for raw in [
+            "8888",
+            "192.168.4.2:8080->8080",
+            "podman:web@10.88.0.5:5432->15432",
+        ] {
             let spec: ForwardSpec = raw.parse().unwrap();
             let shown = display_spec(&spec);
             let back: ForwardSpec = shown.parse().unwrap();
-            assert_eq!(spec, back, "display form {shown:?} must reparse identically");
+            assert_eq!(
+                spec, back,
+                "display form {shown:?} must reparse identically"
+            );
         }
     }
 }

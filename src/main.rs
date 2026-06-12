@@ -55,13 +55,25 @@ async fn run_control_command(cmd: Command) -> Result<()> {
                 s.parse::<ForwardSpec>()
                     .map_err(|e| anyhow::anyhow!("invalid forward spec {s:?}: {e}"))?;
             }
-            (host, specs.into_iter().map(|spec| Request::Add { spec }).collect::<Vec<_>>())
+            (
+                host,
+                specs
+                    .into_iter()
+                    .map(|spec| Request::Add { spec })
+                    .collect::<Vec<_>>(),
+            )
         }
         Command::Drop { host, specs } => {
             if specs.is_empty() {
                 bail!("drop: pass at least one forward spec or local port");
             }
-            (host, specs.into_iter().map(|spec| Request::Drop { spec }).collect())
+            (
+                host,
+                specs
+                    .into_iter()
+                    .map(|spec| Request::Drop { spec })
+                    .collect(),
+            )
         }
         Command::List { host } => (host, vec![Request::List]),
         Command::Status { host } => (host, vec![Request::Status]),
@@ -102,22 +114,59 @@ fn print_entries(entries: &[control::ForwardEntry]) {
 /// Default action: bootstrap an agent on the host and serve the forward set
 /// under the never-give-up supervisor, with control socket + discovery.
 async fn run_client(args: cli::RunArgs) -> Result<()> {
-    let host = args
-        .host
-        .context("no host given; usage: portmanager <host> <spec>...")?;
-
-    // Start from CLI specs merged with the host's remembered state.
-    let state = {
-        let host = host.clone();
-        tokio::task::spawn_blocking(move || config::load_state(&host)).await??
-    };
-    let mut forwards = parse_specs(&args.specs)?;
-    for remembered in state.parsed_forwards() {
-        if !forwards.iter().any(|f| f.local_port == remembered.local_port) {
-            forwards.push(remembered);
+    // Resolve host, initial forwards, rules, and the persistence target from
+    // either a named profile or the per-host remembered state.
+    let (host, mut forwards, rules, persist) = if let Some(name) = &args.profile {
+        let config = tokio::task::spawn_blocking(config::load_config).await??;
+        let profile = config
+            .profiles
+            .get(name)
+            .with_context(|| format!("no profile {name:?} in config.toml"))?;
+        let host = args.host.clone().unwrap_or_else(|| profile.host.clone());
+        if host.is_empty() {
+            bail!("profile {name:?} has no host and none was given on the CLI");
         }
+        let mut forwards =
+            parse_specs(&profile.forwards).with_context(|| format!("in profile {name:?}"))?;
+        forwards.extend(parse_specs(&args.specs)?);
+        (
+            host,
+            forwards,
+            profile.autoforward.clone(),
+            config::PersistTarget::Profile { name: name.clone() },
+        )
+    } else {
+        let host = args
+            .host
+            .clone()
+            .context("no host given; usage: portmanager <host> <spec>...")?;
+        let state = {
+            let host = host.clone();
+            tokio::task::spawn_blocking(move || config::load_state(&host)).await??
+        };
+        let mut forwards = parse_specs(&args.specs)?;
+        for remembered in state.parsed_forwards() {
+            if !forwards
+                .iter()
+                .any(|f| f.local_port == remembered.local_port)
+            {
+                forwards.push(remembered);
+            }
+        }
+        (
+            host.clone(),
+            forwards,
+            state.autoforward,
+            config::PersistTarget::HostState { host },
+        )
+    };
+
+    // Dedup by local port (CLI specs win over profile/state entries).
+    {
+        let mut seen = std::collections::HashSet::new();
+        forwards.retain(|f| seen.insert(f.local_port));
     }
-    if forwards.is_empty() && state.autoforward.is_empty() {
+    if forwards.is_empty() && rules.is_empty() {
         bail!(
             "no forwards given and none remembered for {host:?}; pass at least one spec \
              (e.g. 8888 or 192.168.4.2:8080->8080)"
@@ -135,10 +184,7 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
 
     let forward_set = Arc::new(ForwardSet::new(supervisor.slot.clone()));
     for forward in forwards {
-        forward_set
-            .add(forward)
-            .await
-            .context("binding forward")?;
+        forward_set.add(forward).await.context("binding forward")?;
     }
 
     // Control socket: live add/drop/list/status.
@@ -146,6 +192,7 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         host: host.clone(),
         forwards: forward_set.clone(),
         status: supervisor.status.clone(),
+        persist,
     }));
 
     // Discovery: auto-forward rule matching (no-op without rules).
@@ -153,7 +200,7 @@ async fn run_client(args: cli::RunArgs) -> Result<()> {
         host.clone(),
         supervisor.slot.clone(),
         forward_set.clone(),
-        state.autoforward.clone(),
+        rules,
     ));
 
     // Mosh-style status: announce transitions until Ctrl-C.

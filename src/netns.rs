@@ -120,8 +120,7 @@ impl Helper {
     /// Spawn a helper for `ns`. `nsenter_needed` is false only in tests, which
     /// exercise the protocol without entering a namespace.
     fn spawn(entry: Option<&Entry>) -> Result<Helper> {
-        let (agent_end, helper_end) =
-            UnixStream::pair().context("creating helper socketpair")?;
+        let (agent_end, helper_end) = UnixStream::pair().context("creating helper socketpair")?;
 
         let exe = helper_exe()?;
         let mut cmd = match entry {
@@ -138,7 +137,9 @@ impl Helper {
             }
             Some(Entry::Path(path)) => {
                 let mut c = Command::new("nsenter");
-                c.arg(format!("--net={}", path.display())).arg("--").arg(&exe);
+                c.arg(format!("--net={}", path.display()))
+                    .arg("--")
+                    .arg(&exe);
                 c
             }
             None => Command::new(&exe),
@@ -234,7 +235,12 @@ impl HelperPool {
     }
 
     /// Dial `host:port` inside `ns` and return a tokio TcpStream.
-    pub async fn connect(&self, ns: &NsSpec, host: &str, port: u16) -> Result<tokio::net::TcpStream> {
+    pub async fn connect(
+        &self,
+        ns: &NsSpec,
+        host: &str,
+        port: u16,
+    ) -> Result<tokio::net::TcpStream> {
         // One retry after evicting a dead helper.
         for attempt in 0..2 {
             let helper = self.get_or_spawn(ns).await?;
@@ -273,8 +279,8 @@ impl HelperPool {
             let ns = ns.clone();
             Some(tokio::task::block_in_place(|| resolve(&ns)).context("resolving namespace")?)
         };
-        let helper =
-            tokio::task::block_in_place(|| Helper::spawn(entry.as_ref())).context("spawning helper")?;
+        let helper = tokio::task::block_in_place(|| Helper::spawn(entry.as_ref()))
+            .context("spawning helper")?;
         let helper = std::sync::Arc::new(helper);
         pool.insert(key, helper.clone());
         Ok(helper)

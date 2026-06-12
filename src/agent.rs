@@ -210,7 +210,10 @@ pub async fn serve_with_grace(endpoint: Endpoint, grace: Duration) -> Result<()>
                 break;
             }
             if expired {
-                info!(grace_secs = grace.as_secs(), "grace window expired with no client");
+                info!(
+                    grace_secs = grace.as_secs(),
+                    "grace window expired with no client"
+                );
                 break;
             }
         } else if state_rx.changed().await.is_err() {

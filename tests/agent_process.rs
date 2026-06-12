@@ -72,8 +72,7 @@ async fn agent_binary_bootstraps_and_forwards() {
     let client_id = Identity::generate().unwrap();
     let (mut child, ready) = launch_agent(&client_id, 600).await;
 
-    let client_cfg =
-        crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
+    let client_cfg = crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
     let endpoint = transport::client_endpoint(client_cfg).unwrap();
     let agent_addr: SocketAddr = (Ipv4Addr::LOCALHOST, ready.udp_port).into();
     let conn = transport::connect(&endpoint, agent_addr).await.unwrap();
@@ -95,7 +94,10 @@ async fn agent_binary_bootstraps_and_forwards() {
     let mut echoed = Vec::new();
     sock.read_to_end(&mut echoed).await.unwrap();
 
-    assert_eq!(echoed, payload, "payload not echoed byte-exact through agent");
+    assert_eq!(
+        echoed, payload,
+        "payload not echoed byte-exact through agent"
+    );
 
     child.kill().await.unwrap();
 }
@@ -110,8 +112,7 @@ async fn agent_accepts_reattach_within_grace() {
     let client_id = Identity::generate().unwrap();
     let (mut child, ready) = launch_agent(&client_id, 600).await;
 
-    let client_cfg =
-        crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
+    let client_cfg = crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
     let endpoint = transport::client_endpoint(client_cfg).unwrap();
     let agent_addr: SocketAddr = (Ipv4Addr::LOCALHOST, ready.udp_port).into();
 
@@ -154,8 +155,7 @@ async fn agent_exits_on_shutdown_close() {
     // Long grace: exit must come from the shutdown code, not expiry.
     let (mut child, ready) = launch_agent(&client_id, 600).await;
 
-    let client_cfg =
-        crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
+    let client_cfg = crypto::client_config(&client_id, ready.agent_fp, &Timing::default()).unwrap();
     let endpoint = transport::client_endpoint(client_cfg).unwrap();
     let agent_addr: SocketAddr = (Ipv4Addr::LOCALHOST, ready.udp_port).into();
     let conn = transport::connect(&endpoint, agent_addr).await.unwrap();

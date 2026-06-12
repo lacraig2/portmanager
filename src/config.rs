@@ -86,11 +86,95 @@ impl HostState {
     }
 }
 
+/// A named profile in `config.toml`: a host plus its forward set and rules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Profile {
+    /// SSH host (alias from ~/.ssh/config or user@host).
+    pub host: String,
+    /// Forward specs in CLI grammar.
+    #[serde(default)]
+    pub forwards: Vec<String>,
+    /// Auto-forward rules for this profile.
+    #[serde(default)]
+    pub autoforward: Vec<AutoForwardRule>,
+}
+
+/// Top-level `config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub profiles: BTreeMap<String, Profile>,
+}
+
+/// Path of the main config file.
+pub fn config_path() -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "portmanager")
+        .context("resolving config directory")?;
+    Ok(dirs.config_dir().join("config.toml"))
+}
+
+/// Load `config.toml` (default-empty when absent).
+pub fn load_config() -> Result<Config> {
+    let path = config_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Persist `config.toml` (atomic: write temp + rename).
+pub fn save_config(config: &Config) -> Result<()> {
+    let path = config_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let body = toml::to_string_pretty(config).context("serializing config")?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("installing {}", path.display()))?;
+    Ok(())
+}
+
+/// Where live `add`/`drop` changes are written back to.
+#[derive(Debug, Clone)]
+pub enum PersistTarget {
+    /// Per-host state file (plain `portmanager <host>` launches).
+    HostState { host: String },
+    /// A named profile in config.toml (`--profile NAME` launches).
+    Profile { name: String },
+}
+
+impl PersistTarget {
+    /// Replace the persisted forward list with `specs`.
+    pub fn save_forwards(&self, specs: Vec<String>) -> Result<()> {
+        match self {
+            PersistTarget::HostState { host } => {
+                let mut state = load_state(host)?;
+                state.forwards = specs;
+                save_state(host, &state)
+            }
+            PersistTarget::Profile { name } => {
+                let mut config = load_config()?;
+                let profile = config
+                    .profiles
+                    .get_mut(name)
+                    .with_context(|| format!("profile {name:?} vanished from config.toml"))?;
+                profile.forwards = specs;
+                save_config(&config)
+            }
+        }
+    }
+}
+
 /// Path of the state file for `host`.
 pub fn state_path(host: &str) -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "portmanager")
         .context("resolving config directory")?;
-    Ok(dirs.config_dir().join("state").join(format!("{}.toml", sanitize(host))))
+    Ok(dirs
+        .config_dir()
+        .join("state")
+        .join(format!("{}.toml", sanitize(host))))
 }
 
 /// Load the state for `host` (default-empty when absent).
@@ -119,7 +203,13 @@ pub fn save_state(host: &str, state: &HostState) -> Result<()> {
 /// Make a host string filesystem-safe.
 fn sanitize(host: &str) -> String {
     host.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -152,7 +242,8 @@ mod tests {
     fn state_roundtrip_toml() {
         let mut st = HostState::default();
         st.forwards.push("podman:web@5432->5432".into());
-        st.assignments.insert(HostState::assignment_key("podman:web", 5432), 5432);
+        st.assignments
+            .insert(HostState::assignment_key("podman:web", 5432), 5432);
         st.autoforward.push(AutoForwardRule {
             ns: "podman:web".into(),
             ports: "*".into(),
